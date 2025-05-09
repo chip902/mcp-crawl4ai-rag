@@ -6,16 +6,19 @@ import concurrent.futures
 from typing import List, Dict, Any, Optional, Tuple
 import json
 from supabase import create_client, Client
+import requests
+from dataclasses import dataclass
 from urllib.parse import urlparse
-import openai
 
-# Load OpenAI API key for embeddings
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Ollama configuration
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
 
 
 def get_supabase_client() -> Client:
     """
     Get a Supabase client with the URL and key from environment variables.
+
 
     Returns:
         Supabase client instance
@@ -37,28 +40,40 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     Args:
         texts: List of texts to create embeddings for
 
+
     Returns:
         List of embeddings (each embedding is a list of floats)
+        Returns empty lists for any texts that fail to generate embeddings
     """
     if not texts:
         return []
 
-    try:
-        response = openai.embeddings.create(
-            # Hardcoding embedding model for now, will change this later to be more dynamic
-            model="text-embedding-3-small",
-            input=texts
-        )
-        return [item.embedding for item in response.data]
-    except Exception as e:
-        print(f"Error creating batch embeddings: {e}")
-        # Return empty embeddings if there's an error
-        return [[0.0] * 1536 for _ in range(len(texts))]
+    embeddings = []
+    for text in texts:
+        try:
+            response = requests.post(
+                f"{OLLAMA_BASE_URL}/api/embeddings",
+                json={"model": OLLAMA_MODEL, "prompt": text},
+                timeout=30  # 30 second timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            if 'embedding' not in data:
+                print(
+                    f"Warning: No embedding in response for text: {text[:100]}...")
+                embeddings.append([])
+            else:
+                embeddings.append(data['embedding'])
+        except Exception as e:
+            print(f"Error creating embedding: {str(e)}")
+            embeddings.append([])
+
+    return embeddings
 
 
 def create_embedding(text: str) -> List[float]:
     """
-    Create an embedding for a single text using OpenAI's API.
+    Create an embedding for a single text using Ollama's API.
 
     Args:
         text: Text to create an embedding for
@@ -66,18 +81,33 @@ def create_embedding(text: str) -> List[float]:
     Returns:
         List of floats representing the embedding
     """
+    if not text:
+        return []
+
     try:
-        embeddings = create_embeddings_batch([text])
-        return embeddings[0] if embeddings else [0.0] * 1536
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/embeddings",
+            json={
+                "model": "nomic-embed-text",
+                "prompt": text
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        data = response.json()
+        embedding = data.get('embedding', [])
+        print(f"Generated embedding with dimension: {len(embedding)}")
+        return embedding
     except Exception as e:
         print(f"Error creating embedding: {e}")
         # Return empty embedding if there's an error
-        return [0.0] * 1536
+        return [0.0] * 768
 
 
 def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, bool]:
     """
     Generate contextual information for a chunk within a document to improve retrieval.
+    Uses Ollama API for generating context.
 
     Args:
         full_document: The complete document text
@@ -88,32 +118,37 @@ def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, 
         - The contextual text that situates the chunk within the document
         - Boolean indicating if contextual embedding was performed
     """
-    model_choice = os.getenv("MODEL_CHOICE")
+    model_choice = os.getenv("MODEL_CHOICE", "nomic-embed-text")
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
     try:
         # Create the prompt for generating contextual information
-        prompt = f"""<document> 
-{full_document[:25000]} 
-</document>
-Here is the chunk we want to situate within the whole document 
-<chunk> 
-{chunk}
-</chunk> 
-Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else."""
+        prompt = f"""
+        <document> 
+        {full_document[:25000]}
+        </document>
+        Here is the chunk we want to situate within the whole document 
+        <chunk> 
+        {chunk}
+        </chunk> 
+        Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
+        """
 
-        # Call the OpenAI API to generate contextual information
-        response = openai.chat.completions.create(
-            model=model_choice,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that provides concise contextual information."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=200
+        # Call the Ollama API to generate contextual information
+        response = requests.post(
+            f"{ollama_base_url}/api/embeddings",
+            json={
+                "model": model_choice,
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=60
         )
+        response.raise_for_status()
 
-        # Extract the generated context
-        context = response.choices[0].message.content.strip()
+        # Extract the generated context from Ollama's response
+        response_data = response.json()
+        context = response_data.get('response', '').strip()
 
         # Combine the context with the original chunk
         contextual_text = f"{context}\n---\n{chunk}"
@@ -121,8 +156,8 @@ Please give a short succinct context to situate this chunk within the overall do
         return contextual_text, True
 
     except Exception as e:
-        print(
-            f"Error generating contextual embedding: {e}. Using original chunk instead.")
+        print(f"Error generating contextual embedding with Ollama: {e}")
+        print(f"Using original chunk instead. Error details: {str(e)}")
         return chunk, False
 
 
@@ -143,6 +178,63 @@ def process_chunk_with_context(args):
     return generate_contextual_embedding(full_document, content)
 
 
+@dataclass
+class ProcessedChunk:
+    url: str
+    chunk_number: int
+    title: str
+    summary: str
+    content: str
+    metadata: Dict[str, Any]
+    embedding: List[float]
+
+
+def chunk_text(text: str, chunk_size: int = 5000) -> List[str]:
+    """Split text into chunks, respecting code blocks and paragraphs."""
+    chunks = []
+    start = 0
+    text_length = len(text)
+
+    while start < text_length:
+        # Calculate end position
+        end = start + chunk_size
+
+        # If we're at the end of the text, just take what's left
+        if end >= text_length:
+            chunks.append(text[start:].strip())
+            break
+
+        # Try to find a code block boundary first (```
+        chunk = text[start:end]
+        code_block = chunk.rfind('```')
+        if code_block != -1 and code_block > chunk_size * 0.3:
+            end = start + code_block
+
+        # If no code block, try to break at a paragraph
+        elif '\n\n' in chunk:
+            # Find the last paragraph break
+            last_break = chunk.rfind('\n\n')
+            if last_break > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
+                end = start + last_break
+
+        # If no paragraph break, try to break at a sentence
+        elif '. ' in chunk:
+            # Find the last sentence break
+            last_period = chunk.rfind('. ')
+            if last_period > chunk_size * 0.3:  # Only break if we're past 30% of chunk_size
+                end = start + last_period + 1
+
+        # Extract chunk and clean it up
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        # Move start position for next chunk
+        start = max(start + 1, end)
+
+    return chunks
+
+
 def add_documents_to_supabase(
     client: Client,
     urls: List[str],
@@ -155,6 +247,7 @@ def add_documents_to_supabase(
     """
     Add documents to the Supabase crawled_pages table in batches.
     Deletes existing records with the same URLs before inserting to prevent duplicates.
+
 
     Args:
         client: Supabase client
@@ -175,6 +268,8 @@ def add_documents_to_supabase(
             client.table("crawled_pages").delete().in_(
                 "url", unique_urls).execute()
     except Exception as e:
+        print(
+            f"Batch delete failed: {e}. Trying one-by-one deletion as fallback.")
         print(
             f"Batch delete failed: {e}. Trying one-by-one deletion as fallback.")
         # Fallback: delete records one by one

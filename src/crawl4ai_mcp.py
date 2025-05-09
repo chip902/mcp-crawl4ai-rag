@@ -8,7 +8,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, urldefrag
 from xml.etree import ElementTree
 from dotenv import load_dotenv
@@ -22,6 +22,10 @@ import re
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from utils import get_supabase_client, add_documents_to_supabase, search_documents
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
 
 # Load environment variables from the project root .env file
 project_root = Path(__file__).resolve().parent.parent
@@ -45,8 +49,10 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
     """
     Manages the Crawl4AI client lifecycle.
 
+
     Args:
         server: The FastMCP server instance
+
 
     Yields:
         Crawl4AIContext: The context containing the Crawl4AI crawler and Supabase client
@@ -87,8 +93,10 @@ def is_sitemap(url: str) -> bool:
     """
     Check if a URL is a sitemap.
 
+
     Args:
         url: URL to check
+
 
     Returns:
         True if the URL is a sitemap, False otherwise
@@ -100,8 +108,10 @@ def is_txt(url: str) -> bool:
     """
     Check if a URL is a text file.
 
+
     Args:
         url: URL to check
+
 
     Returns:
         True if the URL is a text file, False otherwise
@@ -113,8 +123,10 @@ def parse_sitemap(sitemap_url: str) -> List[str]:
     """
     Parse a sitemap and extract URLs.
 
+
     Args:
         sitemap_url: URL of the sitemap
+
 
     Returns:
         List of URLs found in the sitemap
@@ -182,13 +194,17 @@ def extract_section_info(chunk: str) -> Dict[str, Any]:
     """
     Extracts headers and stats from a chunk.
 
+
     Args:
         chunk: Markdown chunk
+
 
     Returns:
         Dictionary with headers and stats
     """
     headers = re.findall(r'^(#+)\s+(.+)$', chunk, re.MULTILINE)
+    header_str = '; '.join(
+        [f'{h[0]} {h[1]}' for h in headers]) if headers else ''
     header_str = '; '.join(
         [f'{h[0]} {h[1]}' for h in headers]) if headers else ''
 
@@ -204,12 +220,15 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
     """
     Crawl a single web page and store its content in Supabase.
 
+
     This tool is ideal for quickly retrieving content from a specific URL without following links.
     The content is stored in Supabase for later retrieval and querying.
+
 
     Args:
         ctx: The MCP server provided context
         url: URL of the web page to crawl
+
 
     Returns:
         Summary of the crawling operation and storage in Supabase
@@ -220,6 +239,9 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         supabase_client = ctx.request_context.lifespan_context.supabase_client
 
         # Configure the crawl
+        run_config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS, stream=False)
+
         run_config = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS, stream=False)
 
@@ -246,6 +268,8 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                 meta["chunk_index"] = i
                 meta["url"] = url
                 meta["source"] = urlparse(url).netloc
+                meta["crawl_time"] = str(
+                    asyncio.current_task().get_coro().__name__)
                 meta["crawl_time"] = str(
                     asyncio.current_task().get_coro().__name__)
                 metadatas.append(meta)
@@ -286,12 +310,15 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     """
     Intelligently crawl a URL based on its type and store content in Supabase.
 
+
     This tool automatically detects the URL type and applies the appropriate crawling method:
     - For sitemaps: Extracts and crawls all URLs in parallel
     - For text files (llms.txt): Directly retrieves the content
     - For regular webpages: Recursively crawls internal links up to the specified depth
 
+
     All crawled content is chunked and stored in Supabase for later retrieval and querying.
+
 
     Args:
         ctx: The MCP server provided context
@@ -299,6 +326,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         max_depth: Maximum recursion depth for regular URLs (default: 3)
         max_concurrent: Maximum number of concurrent browser sessions (default: 10)
         chunk_size: Maximum size of each content chunk in characters (default: 1000)
+
 
     Returns:
         JSON string with crawl summary and storage information
@@ -364,6 +392,8 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 meta["crawl_type"] = crawl_type
                 meta["crawl_time"] = str(
                     asyncio.current_task().get_coro().__name__)
+                meta["crawl_time"] = str(
+                    asyncio.current_task().get_coro().__name__)
                 metadatas.append(meta)
 
                 chunk_count += 1
@@ -399,9 +429,11 @@ async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[s
     """
     Crawl a .txt or markdown file.
 
+
     Args:
         crawler: AsyncWebCrawler instance
         url: URL of the file
+
 
     Returns:
         List of dictionaries with URL and markdown content
@@ -420,10 +452,12 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
     """
     Batch crawl multiple URLs in parallel.
 
+
     Args:
         crawler: AsyncWebCrawler instance
         urls: List of URLs to crawl
         max_concurrent: Maximum number of concurrent browser sessions
+
 
     Returns:
         List of dictionaries with URL and markdown content
@@ -443,11 +477,13 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     """
     Recursively crawl internal links from start URLs up to a maximum depth.
 
+
     Args:
         crawler: AsyncWebCrawler instance
         start_urls: List of starting URLs
         max_depth: Maximum recursion depth
         max_concurrent: Maximum number of concurrent browser sessions
+
 
     Returns:
         List of dictionaries with URL and markdown content
@@ -468,6 +504,8 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     results_all = []
 
     for depth in range(max_depth):
+        urls_to_crawl = [normalize_url(
+            url) for url in current_urls if normalize_url(url) not in visited]
         urls_to_crawl = [normalize_url(
             url) for url in current_urls if normalize_url(url) not in visited]
         if not urls_to_crawl:
@@ -514,7 +552,7 @@ async def get_available_sources(ctx: Context) -> str:
         # Use a direct query with the Supabase client
         # This could be more efficient with a direct Postgres query but
         # I don't want to require users to set a DB_URL environment variable as well
-        result = supabase_client.from_('site_pages')\
+        result = supabase_client.from_('crawled_pages')\
             .select('metadata')\
             .not_.is_('metadata->>source', 'null')\
             .execute()
@@ -605,14 +643,239 @@ async def perform_rag_query(ctx: Context, query: str, source: str = None, match_
         }, indent=2)
 
 
+@mcp.tool()
+async def scan_github_repo(ctx: Context, repo_owner: str, repo_name: str) -> str:
+    """
+    Scan a GitHub repository for markdown files and store their content in Supabase.
+
+
+    Args:
+        ctx: The MCP server provided context
+        repo_owner: GitHub repository owner
+        repo_name: GitHub repository name
+
+
+    Returns:
+        JSON string with the scan results
+    """
+    try:
+        # Get the crawler and Supabase client from the context
+        crawler = ctx.request_context.lifespan_context.crawler
+        supabase_client = ctx.request_context.lifespan_context.supabase_client
+
+        # Get markdown file URLs from the GitHub repository
+        docs_urls = await get_docs_urls_from_github(repo_owner, repo_name)
+
+        if not docs_urls:
+            return json.dumps({
+                "success": False,
+                "repo_owner": repo_owner,
+                "repo_name": repo_name,
+                "error": "No markdown files found in the repository"
+            }, indent=2)
+
+        # Process results and store in Supabase
+        urls = []
+        chunk_numbers = []
+        contents = []
+        metadatas = []
+        chunk_count = 0
+
+        for doc in docs_urls:
+            raw_url = doc['raw_url']
+            github_url = doc['github_url']
+
+            # Crawl the markdown file
+            result = await crawler.arun(url=raw_url, config=CrawlerRunConfig())
+
+            if result.success and result.markdown:
+                # Chunk the content
+                chunks = smart_chunk_markdown(result.markdown)
+
+                for i, chunk in enumerate(chunks):
+                    urls.append(github_url)
+                    chunk_numbers.append(i)
+                    contents.append(chunk)
+
+                    # Extract metadata
+                    meta = extract_section_info(chunk)
+                    meta["chunk_index"] = i
+                    meta["url"] = github_url
+                    meta["source"] = urlparse(github_url).netloc
+                    meta["crawl_type"] = "github"
+                    meta["crawl_time"] = str(
+                        asyncio.current_task().get_coro().__name__)
+                    meta["crawl_time"] = str(
+                        asyncio.current_task().get_coro().__name__)
+                    metadatas.append(meta)
+
+                    chunk_count += 1
+
+        # Create url_to_full_document mapping
+        url_to_full_document = {}
+        for doc in docs_urls:
+            url_to_full_document[doc['github_url']] = result.markdown
+
+        # Add to Supabase
+        # IMPORTANT: Adjust this batch size for more speed if you want! Just don't overwhelm your system or the embedding API ;)
+        batch_size = 20
+        add_documents_to_supabase(supabase_client, urls, chunk_numbers,
+                                  contents, metadatas, url_to_full_document, batch_size=batch_size)
+
+        return json.dumps({
+            "success": True,
+            "repo_owner": repo_owner,
+            "repo_name": repo_name,
+            "markdown_files": len(docs_urls),
+            "chunks_stored": chunk_count,
+            "urls_crawled": [doc['github_url'] for doc in docs_urls][:5] + (["..."] if len(docs_urls) > 5 else [])
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "repo_owner": repo_owner,
+            "repo_name": repo_name,
+            "error": str(e)
+        }, indent=2)
+
+
+async def get_docs_urls_from_github(repo_owner: str, repo_name: str) -> List[str]:
+    """
+    Pulls doc URLs from a GitHub repository.
+    """
+    # Set up API credentials (if you have them)
+    api_token = os.getenv("GITHUB_TOKEN")
+    headers = {"Accept": "application/vnd.github.v3+json"}
+
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    else:
+        print("No GitHub token provided. Fetching without authentication.")
+
+    tree_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/git/trees/main?recursive=1"
+
+    try:
+        response = requests.get(tree_url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+        docs_urls = []
+
+        # Check if we have a tree in the response
+        if "tree" not in data:
+            print(f"No tree found in response: {data}")
+            return docs_urls
+
+        # Find markdown files in the repository
+        for item in data["tree"]:
+            if item["type"] == "blob" and item["path"].endswith(".md"):
+                # Use the raw content URL for direct access to the file
+                raw_url = f"https://raw.githubusercontent.com/{repo_owner}/{repo_name}/main/{item['path']}"
+                # Use the GitHub UI URL for displaying in the results
+                github_url = f"https://github.com/{repo_owner}/{repo_name}/blob/main/{item['path']}"
+
+                docs_urls.append(
+                    {"raw_url": raw_url, "github_url": github_url})
+                print(f"Found markdown file: {github_url}")
+
+        return docs_urls
+
+    except Exception as e:
+        print(f"Error fetching GitHub tree or file: {str(e)}")
+        return []
+
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Crawl4AI MCP Server",
+    description="A server for web crawling and document processing using Crawl4AI",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Define request/response models
+
+
+class CrawlRequest(BaseModel):
+    url: str
+
+
+class SearchRequest(BaseModel):
+    query: str
+    match_count: int = 5
+
+
+class GitHubScanRequest(BaseModel):
+    repo_owner: str
+    repo_name: str
+
+
+@app.post("/crawl")
+async def crawl_endpoint(request: CrawlRequest):
+    try:
+        result = await mcp.call_tool("smart_crawl_url", {
+            "url": request.url
+        })
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/search")
+async def search_endpoint(request: SearchRequest):
+    try:
+        result = await mcp.call_tool("perform_rag_query", {
+            "query": request.query,
+            "match_count": request.match_count
+        })
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/scan_github")
+async def scan_github_endpoint(request: GitHubScanRequest):
+    try:
+        result = await mcp.call_tool("scan_github_repo", {
+            "repo_owner": request.repo_owner,
+            "repo_name": request.repo_name
+        })
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/openapi.json")
+async def get_openapi():
+    openapi_spec = app.openapi()
+    return openapi_spec
+
+# Update main function to use FastAPI
+
+
 async def main():
     transport = os.getenv("TRANSPORT", "sse")
     if transport == 'sse':
         # Run the MCP server with sse transport
         await mcp.run_sse_async()
     else:
-        # Run the MCP server with stdio transport
-        await mcp.run_stdio_async()
+        # Run FastAPI server
+        config = uvicorn.Config(
+            app=app,
+            host="0.0.0.0",
+            port=8000,
+            log_level="info"
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
 
 if __name__ == "__main__":
     asyncio.run(main())

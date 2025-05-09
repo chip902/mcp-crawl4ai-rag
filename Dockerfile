@@ -15,6 +15,9 @@ COPY . .
 RUN uv pip install --system -e . && \
     crawl4ai-setup
 
+# Install Playwright browsers
+RUN playwright install --with-deps chromium
+
 EXPOSE ${PORT}
 
 # Command to run the MCP server
