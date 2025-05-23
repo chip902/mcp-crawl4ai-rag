@@ -52,7 +52,7 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     for text in texts:
         try:
             response = requests.post(
-                f"{OLLAMA_BASE_URL}/api/embeddings",
+                f"{OLLAMA_BASE_URL}/api/embed",
                 json={"model": OLLAMA_MODEL, "prompt": text},
                 timeout=30  # 30 second timeout
             )
