@@ -89,20 +89,28 @@ def create_embedding(text: str) -> List[float]:
             f"{OLLAMA_BASE_URL}/api/embed",
             json={
                 "model": "nomic-embed-text",
-                "prompt": text
+                "input": text  # Changed from 'prompt' to 'input'
             },
             timeout=60
         )
         response.raise_for_status()
         data = response.json()
-        # The new API returns the embedding directly in the response
-        embedding = data.get('embedding', [])
-        print(f"Generated embedding with dimension: {len(embedding)}")
-        return embedding
+
+        # Extract embeddings from the response
+        if 'embeddings' in data and len(data['embeddings']) > 0:
+            embedding = data['embeddings'][0]  # Get first (and only) embedding
+            print(f"Generated embedding with dimension: {len(embedding)}")
+            return embedding
+
+        print(f"Unexpected response format: {data}")
+        return [0.0] * 768  # Return empty embedding on error
+
     except Exception as e:
         print(f"Error creating embedding: {e}")
-        # Return empty embedding if there's an error
-        return [0.0] * 768
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response status: {e.response.status_code}")
+            print(f"Response body: {e.response.text}")
+        return [0.0] * 768  # Return empty embedding on error
 
 
 def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, bool]:
@@ -136,23 +144,32 @@ def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, 
         """
 
         # Call the Ollama API to generate contextual information
-        response = requests.post(
-            f"{ollama_base_url}/api/embed",
-            json={
-                "model": model_choice,
-                "prompt": prompt
-            },
-            timeout=60
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                f"{ollama_base_url}/api/embed",
+                json={
+                    "model": model_choice,
+                    "input": prompt  # Changed from 'prompt' to 'input'
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            data = response.json()
 
-        # The new API returns the embedding directly in the response
-        # Since we're using this for context generation, we'll use the embedding
-        # to find similar content, but we don't need to store it here
-        # response_data = response.json()
-        # The response contains the embedding, but we're not using it for context
-        # So we'll just return an empty context for now
-        context = ''
+            # Extract and use the embedding if available
+            if 'embeddings' in data and len(data['embeddings']) > 0:
+                embedding = data['embeddings'][0]
+                context = f"Context from embedding (dim: {len(embedding)})"
+            else:
+                print(f"No embeddings in response: {data}")
+                context = ''
+
+        except Exception as e:
+            print(f"Error in contextual embedding: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response body: {e.response.text}")
+            return chunk, False
 
         # Combine the context with the original chunk
         contextual_text = f"{context}\n---\n{chunk}"
