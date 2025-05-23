@@ -3,6 +3,7 @@ Utility functions for the Crawl4AI MCP server.
 """
 import os
 import concurrent.futures
+import time
 from typing import List, Dict, Any, Optional, Tuple
 import json
 from supabase import create_client, Client
@@ -71,12 +72,14 @@ def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
     return embeddings
 
 
-def create_embedding(text: str) -> List[float]:
+def create_embedding(text: str, max_retries: int = 2) -> List[float]:
     """
-    Create an embedding for a single text using Ollama's API.
+    Create an embedding for a single text using Ollama's API with retry logic.
+    Falls back to simpler methods if Ollama fails.
 
     Args:
         text: Text to create an embedding for
+        max_retries: Number of times to retry the API call
 
     Returns:
         List of floats representing the embedding
@@ -84,33 +87,100 @@ def create_embedding(text: str) -> List[float]:
     if not text:
         return []
 
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/embed",
-            json={
-                "model": "nomic-embed-text",
-                "input": text  # Changed from 'prompt' to 'input'
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        data = response.json()
+    # Try with Ollama first
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(
+                f"{OLLAMA_BASE_URL}/api/embed",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "input": text
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            data = response.json()
 
-        # Extract embeddings from the response
-        if 'embeddings' in data and len(data['embeddings']) > 0:
-            embedding = data['embeddings'][0]  # Get first (and only) embedding
-            print(f"Generated embedding with dimension: {len(embedding)}")
-            return embedding
+            # Extract embeddings from the response
+            if 'embeddings' in data and len(data['embeddings']) > 0 and len(data['embeddings'][0]) > 0:
+                embedding = data['embeddings'][0]
+                print(f"Generated embedding with dimension: {len(embedding)}")
+                return embedding
 
-        print(f"Unexpected response format: {data}")
-        return [0.0] * 768  # Return empty embedding on error
+            print(
+                f"Unexpected response format on attempt {attempt + 1}: {data}")
 
-    except Exception as e:
-        print(f"Error creating embedding: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"Response status: {e.response.status_code}")
-            print(f"Response body: {e.response.text}")
-        return [0.0] * 768  # Return empty embedding on error
+        except Exception as e:
+            print(f"Error creating embedding (attempt {attempt + 1}): {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response body: {e.response.text}")
+
+            # If this was the last attempt, try fallback methods
+            if attempt == max_retries - 1:
+                print("Falling back to simpler embedding method...")
+                return fallback_embedding(text)
+
+            # Exponential backoff before retry
+            time.sleep(1 * (2 ** attempt))
+
+    return fallback_embedding(text)
+
+
+def fallback_embedding(text: str, dimensions: int = 768) -> List[float]:
+    """
+    Generate a simple fallback embedding when Ollama is not available.
+    This is better than returning a zero vector as it preserves some text information.
+
+    Args:
+        text: Text to create an embedding for
+        dimensions: Desired embedding dimension size
+
+    Returns:
+        List of floats representing a simple embedding
+    """
+    if not text:
+        return [0.0] * dimensions
+
+    # Simple character frequency based embedding
+    import string
+    from collections import defaultdict
+
+    # Initialize character counts
+    char_counts = defaultdict(float)
+    total_chars = max(1, len(text))  # Avoid division by zero
+
+    # Count character frequencies
+    for char in text.lower():
+        if char in string.ascii_lowercase + ' ':
+            char_counts[char] += 1.0
+
+    # Normalize counts
+    for char in char_counts:
+        char_counts[char] /= total_chars
+
+    # Create a simple embedding based on character frequencies
+    embedding = []
+    for i in range(dimensions):
+        # Use a simple hash of the text to seed the embedding
+        # This ensures the same text always gets the same embedding
+        seed = hash(text + str(i)) % 1000 / 1000.0
+
+        # Add some randomness based on character frequencies
+        for j, char in enumerate(string.ascii_lowercase + ' '):
+            if j < len(embedding):
+                embedding[j] = (
+                    embedding[j] + (char_counts.get(char, 0) * seed)) / 2.0
+            else:
+                embedding.append(char_counts.get(char, 0) * seed)
+
+    # Pad with zeros if needed
+    while len(embedding) < dimensions:
+        embedding.append(0.0)
+
+    # Normalize to unit length
+    norm = (sum(x*x for x in embedding) ** 0.5) or 1.0
+    return [x/norm for x in embedding][:dimensions]
 
 
 def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, bool]:
@@ -358,7 +428,17 @@ def add_documents_to_supabase(
         batch_embeddings = create_embeddings_batch(contextual_contents)
 
         batch_data = []
+        valid_count = 0
+
         for j in range(len(contextual_contents)):
+            # Ensure we have a valid embedding or generate a fallback
+            embedding = batch_embeddings[j]
+            if not embedding or not isinstance(embedding, list) or len(embedding) == 0:
+                print(
+                    f"Warning: Using fallback embedding for document {batch_urls[j]}")
+                # Generate a fallback embedding based on content
+                embedding = fallback_embedding(contextual_contents[j])
+
             # Extract metadata fields
             chunk_size = len(contextual_contents[j])
 
@@ -369,19 +449,30 @@ def add_documents_to_supabase(
                 "content": contextual_contents[j],  # Store original content
                 "metadata": {
                     "chunk_size": chunk_size,
+                    "embedding_type": "ollama" if embedding is batch_embeddings[j] else "fallback",
                     **batch_metadatas[j]
                 },
-                # Use embedding from contextual content
-                "embedding": batch_embeddings[j]
+                "embedding": embedding  # Use either Ollama or fallback embedding
             }
 
             batch_data.append(data)
+            valid_count += 1
 
-        # Insert batch into Supabase
-        try:
-            client.table("crawled_pages").insert(batch_data).execute()
-        except Exception as e:
-            print(f"Error inserting batch into Supabase: {e}")
+        # Only insert if we have valid data
+        if batch_data:
+            try:
+                result = client.table("crawled_pages").insert(
+                    batch_data).execute()
+                print(
+                    f"Successfully inserted {valid_count} documents into Supabase")
+            except Exception as e:
+                print(f"Error inserting batch into Supabase: {e}")
+                # Print first problematic embedding for debugging
+                if batch_data and 'embedding' in batch_data[0]:
+                    print(
+                        f"First embedding shape: {len(batch_data[0]['embedding'])}")
+        else:
+            print("Warning: No valid documents with embeddings to insert")
 
 
 def search_documents(
