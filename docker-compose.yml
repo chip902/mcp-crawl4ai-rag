@@ -1,0 +1,21 @@
+version: '3'
+services:
+  mcp-server:
+    image: mcp/crawl4ai-rag:latest
+    ports:
+      - "8051:8051"
+    networks:
+      - app_network
+
+  mcpo-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mcp-server
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge

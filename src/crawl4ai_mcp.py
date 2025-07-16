@@ -26,6 +26,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 # Load environment variables from the project root .env file
 project_root = Path(__file__).resolve().parent.parent
@@ -34,9 +38,8 @@ dotenv_path = project_root / '.env'
 # Force override of existing environment variables
 load_dotenv(dotenv_path, override=True)
 
+
 # Create a dataclass for our application context
-
-
 @dataclass
 class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
@@ -65,10 +68,19 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
 
     # Initialize the crawler
     crawler = AsyncWebCrawler(config=browser_config)
-    await crawler.__aenter__()
+    try:
+        await crawler.__aenter__()
+    except Exception as exc:
+        logging.error(f"Error initializing crawler: {exc}")
+        raise
 
     # Initialize Supabase client
-    supabase_client = get_supabase_client()
+    try:
+        supabase_client = get_supabase_client()
+    except Exception as exc:
+        logging.error(f"Error initializing Supabase client: {exc}")
+        await crawler.__aexit__(None, None, None)
+        raise
 
     try:
         yield Crawl4AIContext(
@@ -77,7 +89,11 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         )
     finally:
         # Clean up the crawler
-        await crawler.__aexit__(None, None, None)
+        try:
+            await crawler.__aexit__(None, None, None)
+        except Exception as exc:
+            logging.error(f"Error cleaning up crawler: {exc}")
+
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -242,9 +258,6 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         run_config = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS, stream=False)
 
-        run_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS, stream=False)
-
         # Crawl the page
         result = await crawler.arun(url=url, config=run_config)
 
@@ -331,6 +344,8 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     Returns:
         JSON string with crawl summary and storage information
     """
+    logging.info(f"Invoked smart_crawl_url with url: {url}, max_depth: {max_depth}, max_concurrent: {max_concurrent}, chunk_size: {chunk_size}")
+
     try:
         # Get the crawler and Supabase client from the context
         crawler = ctx.request_context.lifespan_context.crawler
@@ -392,8 +407,6 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 meta["crawl_type"] = crawl_type
                 meta["crawl_time"] = str(
                     asyncio.current_task().get_coro().__name__)
-                meta["crawl_time"] = str(
-                    asyncio.current_task().get_coro().__name__)
                 metadatas.append(meta)
 
                 chunk_count += 1
@@ -418,6 +431,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             "urls_crawled": [doc['url'] for doc in crawl_results][:5] + (["..."] if len(crawl_results) > 5 else [])
         }, indent=2)
     except Exception as e:
+        logging.error(f"Error in smart_crawl_url: {e}")
         return json.dumps({
             "success": False,
             "url": url,
@@ -817,6 +831,14 @@ class GitHubScanRequest(BaseModel):
     repo_owner: str
     repo_name: str
 
+@app.post("/invoke_tool")
+async def invoke_tool(tool_name: str, params: Dict[str, Any]):
+    try:
+        result = await mcp.call_tool(tool_name, params)
+        return result
+    except Exception as e:
+        logging.error(f"Error invoking tool {tool_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/crawl")
 async def crawl_endpoint(request: CrawlRequest):

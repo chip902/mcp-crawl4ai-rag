@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the MCP server files
 COPY . .
 
+# Ensure the .env file is copied if it's not already
+COPY .env .
+
 # Install packages directly to the system (no virtual environment)
 # Combining commands to reduce Docker layers
 RUN uv pip install --system -e . && \
@@ -30,6 +33,7 @@ RUN playwright install --with-deps chromium
 
 EXPOSE ${PORT}
 
+RUN apt-get update && apt-get install -y curl
+
 # Command to run the MCP server
-# CMD ["uv", "run", "src/crawl4ai_mcp.py"]
 CMD ["python", "src/crawl4ai_mcp.py"]
