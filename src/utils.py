@@ -10,10 +10,78 @@ from supabase import create_client, Client
 import requests
 from dataclasses import dataclass
 from urllib.parse import urlparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Ollama configuration
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
+
+# Connection validation cache
+_ollama_validated = False
+_supabase_validated = False
+
+
+def validate_ollama_connection() -> bool:
+    """
+    Validate that Ollama is accessible and the model is available.
+
+    Returns:
+        True if connection is valid, False otherwise
+    """
+    global _ollama_validated
+
+    if _ollama_validated:
+        return True
+
+    try:
+        # Try to get model list
+        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        response.raise_for_status()
+
+        # Check if our model is available
+        models = response.json().get("models", [])
+        model_names = [m.get("name", "") for m in models]
+
+        if OLLAMA_MODEL not in model_names:
+            logger.warning(f"Model {OLLAMA_MODEL} not found in Ollama. Available models: {model_names}")
+            logger.warning("Embeddings will use fallback mode")
+            return False
+
+        logger.info(f"Ollama connection validated. Model {OLLAMA_MODEL} is available.")
+        _ollama_validated = True
+        return True
+    except Exception as e:
+        logger.warning(f"Ollama connection validation failed: {e}")
+        logger.warning("Embeddings will use fallback mode")
+        return False
+
+
+def validate_supabase_connection(client: Client) -> bool:
+    """
+    Validate that Supabase is accessible.
+
+    Args:
+        client: Supabase client instance
+
+    Returns:
+        True if connection is valid, False otherwise
+    """
+    global _supabase_validated
+
+    if _supabase_validated:
+        return True
+
+    try:
+        # Try a simple query to validate connection
+        result = client.table("crawled_pages").select("id").limit(1).execute()
+        logger.info("Supabase connection validated successfully")
+        _supabase_validated = True
+        return True
+    except Exception as e:
+        logger.error(f"Supabase connection validation failed: {e}")
+        raise ValueError(f"Cannot connect to Supabase: {e}")
 
 
 def get_supabase_client() -> Client:
@@ -31,43 +99,70 @@ def get_supabase_client() -> Client:
         raise ValueError(
             "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment variables")
 
-    return create_client(url, key)
+    client = create_client(url, key)
+    validate_supabase_connection(client)
+    return client
 
 
-def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
+def create_embeddings_batch(texts: List[str], max_retries: int = 3) -> List[List[float]]:
     """
-    Create embeddings for multiple texts in a single API call.
+    Create embeddings for multiple texts with retry logic.
 
     Args:
         texts: List of texts to create embeddings for
+        max_retries: Number of retries for failed embeddings
 
 
     Returns:
         List of embeddings (each embedding is a list of floats)
-        Returns empty lists for any texts that fail to generate embeddings
+        Returns fallback embeddings for any texts that fail to generate embeddings
     """
     if not texts:
         return []
 
+    # Validate Ollama connection first
+    ollama_available = validate_ollama_connection()
+
     embeddings = []
-    for text in texts:
-        try:
-            response = requests.post(
-                f"{OLLAMA_BASE_URL}/api/embed",
-                json={"model": OLLAMA_MODEL, "prompt": text},
-                timeout=30  # 30 second timeout
-            )
-            response.raise_for_status()
-            data = response.json()
-            if 'embedding' not in data:
-                print(
-                    f"Warning: No embedding in response for text: {text[:100]}...")
-                embeddings.append([])
-            else:
-                embeddings.append(data['embedding'])
-        except Exception as e:
-            print(f"Error creating embedding: {str(e)}")
-            embeddings.append([])
+    for idx, text in enumerate(texts):
+        if not ollama_available:
+            logger.debug(f"Using fallback embedding for text {idx}")
+            embeddings.append(fallback_embedding(text))
+            continue
+
+        success = False
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{OLLAMA_BASE_URL}/api/embed",
+                    json={"model": OLLAMA_MODEL, "input": text},
+                    timeout=30  # 30 second timeout
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if 'embeddings' in data and len(data['embeddings']) > 0:
+                    embeddings.append(data['embeddings'][0])
+                    success = True
+                    break
+                elif 'embedding' in data:
+                    embeddings.append(data['embedding'])
+                    success = True
+                    break
+                else:
+                    logger.warning(f"No embedding in response for text {idx}: {data}")
+            except requests.exceptions.Timeout:
+                logger.warning(f"Timeout creating embedding for text {idx}, attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (2 ** attempt))  # Exponential backoff
+            except Exception as e:
+                logger.warning(f"Error creating embedding for text {idx}, attempt {attempt + 1}/{max_retries}: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (2 ** attempt))
+
+        if not success:
+            logger.warning(f"Failed to create embedding for text {idx} after {max_retries} attempts, using fallback")
+            embeddings.append(fallback_embedding(text))
 
     return embeddings
 
@@ -104,21 +199,21 @@ def create_embedding(text: str, max_retries: int = 2) -> List[float]:
             # Extract embeddings from the response
             if 'embeddings' in data and len(data['embeddings']) > 0 and len(data['embeddings'][0]) > 0:
                 embedding = data['embeddings'][0]
-                print(f"Generated embedding with dimension: {len(embedding)}")
+                logger.debug(f"Generated embedding with dimension: {len(embedding)}")
                 return embedding
 
-            print(
+            logger.warning(
                 f"Unexpected response format on attempt {attempt + 1}: {data}")
 
         except Exception as e:
-            print(f"Error creating embedding (attempt {attempt + 1}): {e}")
+            logger.warning(f"Error creating embedding (attempt {attempt + 1}): {e}")
             if hasattr(e, 'response') and e.response is not None:
-                print(f"Response status: {e.response.status_code}")
-                print(f"Response body: {e.response.text}")
+                logger.debug(f"Response status: {e.response.status_code}")
+                logger.debug(f"Response body: {e.response.text}")
 
             # If this was the last attempt, try fallback methods
             if attempt == max_retries - 1:
-                print("Falling back to simpler embedding method...")
+                logger.warning("Falling back to simpler embedding method...")
                 return fallback_embedding(text)
 
             # Exponential backoff before retry
@@ -231,14 +326,14 @@ def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, 
                 embedding = data['embeddings'][0]
                 context = f"Context from embedding (dim: {len(embedding)})"
             else:
-                print(f"No embeddings in response: {data}")
+                logger.warning(f"No embeddings in response: {data}")
                 context = ''
 
         except Exception as e:
-            print(f"Error in contextual embedding: {e}")
+            logger.warning(f"Error in contextual embedding: {e}")
             if hasattr(e, 'response') and e.response is not None:
-                print(f"Response status: {e.response.status_code}")
-                print(f"Response body: {e.response.text}")
+                logger.debug(f"Response status: {e.response.status_code}")
+                logger.debug(f"Response body: {e.response.text}")
             return chunk, False
 
         # Combine the context with the original chunk
@@ -247,8 +342,8 @@ def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, 
         return contextual_text, True
 
     except Exception as e:
-        print(f"Error generating contextual embedding with Ollama: {e}")
-        print(f"Using original chunk instead. Error details: {str(e)}")
+        logger.warning(f"Error generating contextual embedding with Ollama: {e}")
+        logger.debug(f"Using original chunk instead. Error details: {str(e)}")
         return chunk, False
 
 
@@ -359,16 +454,14 @@ def add_documents_to_supabase(
             client.table("crawled_pages").delete().in_(
                 "url", unique_urls).execute()
     except Exception as e:
-        print(
-            f"Batch delete failed: {e}. Trying one-by-one deletion as fallback.")
-        print(
+        logger.warning(
             f"Batch delete failed: {e}. Trying one-by-one deletion as fallback.")
         # Fallback: delete records one by one
         for url in unique_urls:
             try:
                 client.table("crawled_pages").delete().eq("url", url).execute()
             except Exception as inner_e:
-                print(f"Error deleting record for URL {url}: {inner_e}")
+                logger.error(f"Error deleting record for URL {url}: {inner_e}")
                 # Continue with the next URL even if one fails
 
     # Check if MODEL_CHOICE is set for contextual embeddings
@@ -410,14 +503,14 @@ def add_documents_to_supabase(
                         if success:
                             batch_metadatas[idx]["contextual_embedding"] = True
                     except Exception as e:
-                        print(f"Error processing chunk {idx}: {e}")
+                        logger.error(f"Error processing chunk {idx}: {e}")
                         # Use original content as fallback
                         contextual_contents.append(batch_contents[idx])
 
             # Sort results back into original order if needed
             if len(contextual_contents) != len(batch_contents):
-                print(
-                    f"Warning: Expected {len(batch_contents)} results but got {len(contextual_contents)}")
+                logger.warning(
+                    f"Expected {len(batch_contents)} results but got {len(contextual_contents)}")
                 # Use original contents as fallback
                 contextual_contents = batch_contents
         else:
@@ -434,8 +527,8 @@ def add_documents_to_supabase(
             # Ensure we have a valid embedding or generate a fallback
             embedding = batch_embeddings[j]
             if not embedding or not isinstance(embedding, list) or len(embedding) == 0:
-                print(
-                    f"Warning: Using fallback embedding for document {batch_urls[j]}")
+                logger.warning(
+                    f"Using fallback embedding for document {batch_urls[j]}")
                 # Generate a fallback embedding based on content
                 embedding = fallback_embedding(contextual_contents[j])
 
@@ -463,16 +556,16 @@ def add_documents_to_supabase(
             try:
                 result = client.table("crawled_pages").insert(
                     batch_data).execute()
-                print(
+                logger.info(
                     f"Successfully inserted {valid_count} documents into Supabase")
             except Exception as e:
-                print(f"Error inserting batch into Supabase: {e}")
+                logger.error(f"Error inserting batch into Supabase: {e}")
                 # Print first problematic embedding for debugging
                 if batch_data and 'embedding' in batch_data[0]:
-                    print(
+                    logger.debug(
                         f"First embedding shape: {len(batch_data[0]['embedding'])}")
         else:
-            print("Warning: No valid documents with embeddings to insert")
+            logger.warning("No valid documents with embeddings to insert")
 
 
 def search_documents(
@@ -513,5 +606,5 @@ def search_documents(
 
         return result.data
     except Exception as e:
-        print(f"Error searching documents: {e}")
+        logger.error(f"Error searching documents: {e}")
         return []

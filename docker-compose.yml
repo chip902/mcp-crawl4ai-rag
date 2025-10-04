@@ -1,19 +1,43 @@
 services:
     mcp-server:
+        build:
+            context: .
+            dockerfile: Dockerfile
         image: mcp/crawl4ai-rag:latest
         ports:
             - "8051:8051"
+        environment:
+            - TRANSPORT=sse
+            - HOST=0.0.0.0
+            - PORT=8051
+            - OLLAMA_BASE_URL=http://192.168.1.10:11434
+            - OLLAMA_MODEL=nomic-embed-text
+            - MODEL_CHOICE=nomic-embed-text
+            - SUPABASE_URL=http://192.168.1.10:8000
+            - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+            - GITHUB_TOKEN=${GITHUB_TOKEN}
         networks:
             - app_network
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:8051/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 40s
+        restart: unless-stopped
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
 
     mcpo-proxy:
         build: .
         ports:
             - "8080:8080"
         depends_on:
-            - mcp-server
+            mcp-server:
+                condition: service_healthy
         networks:
             - app_network
+        restart: unless-stopped
 
 networks:
     app_network:

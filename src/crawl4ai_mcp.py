@@ -27,9 +27,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import logging
+import sys
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from the project root .env file
 project_root = Path(__file__).resolve().parent.parent
@@ -37,6 +45,65 @@ dotenv_path = project_root / '.env'
 
 # Force override of existing environment variables
 load_dotenv(dotenv_path, override=True)
+
+
+def validate_configuration():
+    """
+    Validate required environment variables and system dependencies on startup.
+    Raises ValueError if critical configuration is missing.
+    """
+    logger.info("Validating configuration...")
+
+    required_vars = {
+        "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+        "SUPABASE_SERVICE_KEY": os.getenv("SUPABASE_SERVICE_KEY"),
+    }
+
+    optional_vars = {
+        "TRANSPORT": os.getenv("TRANSPORT", "sse"),
+        "HOST": os.getenv("HOST", "0.0.0.0"),
+        "PORT": os.getenv("PORT", "8051"),
+        "OLLAMA_BASE_URL": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "nomic-embed-text"),
+    }
+
+    # Check required variables
+    missing_vars = [name for name, value in required_vars.items() if not value]
+    if missing_vars:
+        error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    # Log configuration
+    logger.info("Configuration validated successfully:")
+    for name, value in required_vars.items():
+        # Don't log sensitive values in full
+        if "KEY" in name or "SECRET" in name:
+            logger.info(f"  {name}: {'*' * 20}")
+        else:
+            logger.info(f"  {name}: {value}")
+
+    for name, value in optional_vars.items():
+        logger.info(f"  {name}: {value}")
+
+    # Validate Ollama connection (non-blocking)
+    from utils import validate_ollama_connection
+    ollama_ok = validate_ollama_connection()
+    if not ollama_ok:
+        logger.warning("Ollama is not available - will use fallback embeddings")
+    else:
+        logger.info("Ollama connection validated")
+
+    logger.info("Configuration validation complete")
+
+
+# Validate configuration on module load
+try:
+    validate_configuration()
+except Exception as e:
+    logger.error(f"Configuration validation failed: {e}")
+    logger.error("Server may not function correctly. Please check your .env file.")
+    # Don't raise here - let the server start but log the error
 
 
 # Create a dataclass for our application context
@@ -254,12 +321,20 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
         crawler = ctx.request_context.lifespan_context.crawler
         supabase_client = ctx.request_context.lifespan_context.supabase_client
 
-        # Configure the crawl
+        # Configure the crawl with timeout
         run_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS, stream=False)
+            cache_mode=CacheMode.BYPASS,
+            stream=False,
+            page_timeout=60000,  # 60 second timeout
+            wait_until="networkidle"
+        )
 
-        # Crawl the page
-        result = await crawler.arun(url=url, config=run_config)
+        # Crawl the page with timeout
+        logger.info(f"Starting crawl for URL: {url}")
+        result = await asyncio.wait_for(
+            crawler.arun(url=url, config=run_config),
+            timeout=90.0  # 90 second overall timeout
+        )
 
         if result.success and result.markdown:
             # Chunk the content
@@ -305,16 +380,26 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
                 }
             }, indent=2)
         else:
+            logger.warning(f"Crawl failed for {url}: {result.error_message}")
             return json.dumps({
                 "success": False,
                 "url": url,
                 "error": result.error_message
             }, indent=2)
-    except Exception as e:
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout crawling {url} after 90 seconds")
         return json.dumps({
             "success": False,
             "url": url,
-            "error": str(e)
+            "error": "Crawl operation timed out after 90 seconds"
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error crawling {url}: {str(e)}", exc_info=True)
+        return json.dumps({
+            "success": False,
+            "url": url,
+            "error": str(e),
+            "error_type": type(e).__name__
         }, indent=2)
 
 
@@ -452,13 +537,27 @@ async def crawl_markdown_file(crawler: AsyncWebCrawler, url: str) -> List[Dict[s
     Returns:
         List of dictionaries with URL and markdown content
     """
-    crawl_config = CrawlerRunConfig()
+    crawl_config = CrawlerRunConfig(
+        page_timeout=60000,
+        wait_until="networkidle"
+    )
 
-    result = await crawler.arun(url=url, config=crawl_config)
-    if result.success and result.markdown:
-        return [{'url': url, 'markdown': result.markdown}]
-    else:
-        print(f"Failed to crawl {url}: {result.error_message}")
+    try:
+        result = await asyncio.wait_for(
+            crawler.arun(url=url, config=crawl_config),
+            timeout=90.0
+        )
+        if result.success and result.markdown:
+            logger.info(f"Successfully crawled markdown file: {url}")
+            return [{'url': url, 'markdown': result.markdown}]
+        else:
+            logger.warning(f"Failed to crawl {url}: {result.error_message}")
+            return []
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout crawling markdown file {url}")
+        return []
+    except Exception as e:
+        logger.error(f"Error crawling markdown file {url}: {e}", exc_info=True)
         return []
 
 
@@ -476,15 +575,33 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
     Returns:
         List of dictionaries with URL and markdown content
     """
-    crawl_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
+    crawl_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        stream=False,
+        page_timeout=60000,
+        wait_until="networkidle"
+    )
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
         max_session_permit=max_concurrent
     )
 
-    results = await crawler.arun_many(urls=urls, config=crawl_config, dispatcher=dispatcher)
-    return [{'url': r.url, 'markdown': r.markdown} for r in results if r.success and r.markdown]
+    try:
+        logger.info(f"Starting batch crawl of {len(urls)} URLs with max_concurrent={max_concurrent}")
+        results = await asyncio.wait_for(
+            crawler.arun_many(urls=urls, config=crawl_config, dispatcher=dispatcher),
+            timeout=300.0  # 5 minute timeout for batch operations
+        )
+        successful = [{'url': r.url, 'markdown': r.markdown} for r in results if r.success and r.markdown]
+        logger.info(f"Batch crawl completed: {len(successful)}/{len(urls)} successful")
+        return successful
+    except asyncio.TimeoutError:
+        logger.error(f"Batch crawl timed out after 300 seconds")
+        return []
+    except Exception as e:
+        logger.error(f"Error in batch crawl: {e}", exc_info=True)
+        return []
 
 
 async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: List[str], max_depth: int = 3, max_concurrent: int = 10) -> List[Dict[str, Any]]:
@@ -502,7 +619,12 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     Returns:
         List of dictionaries with URL and markdown content
     """
-    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, stream=False)
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        stream=False,
+        page_timeout=60000,
+        wait_until="networkidle"
+    )
     dispatcher = MemoryAdaptiveDispatcher(
         memory_threshold_percent=70.0,
         check_interval=1.0,
@@ -1005,58 +1127,167 @@ class GitHubScanRequest(BaseModel):
 
 @app.post("/invoke_tool")
 async def invoke_tool(tool_name: str, params: Dict[str, Any]):
+    """
+    Generic tool invocation endpoint with proper context management.
+    """
     try:
-        result = await mcp.call_tool(tool_name, params)
-        return result
+        logger.info(f"Invoking tool: {tool_name} with params: {params}")
+
+        # Create a mock context for HTTP endpoint calls
+        # This ensures the MCP tools can access the lifespan context
+        class MockContext:
+            def __init__(self, lifespan_ctx):
+                self.request_context = type('obj', (object,), {
+                    'lifespan_context': lifespan_ctx
+                })()
+
+        # Get the lifespan context from the MCP server
+        # Note: This assumes the MCP server's lifespan has been initialized
+        async with mcp._lifespan_manager() as lifespan_ctx:
+            mock_ctx = MockContext(lifespan_ctx)
+
+            # Map tool names to their corresponding functions
+            if tool_name == "crawl_single_page":
+                result = await crawl_single_page(mock_ctx, **params)
+            elif tool_name == "smart_crawl_url":
+                result = await smart_crawl_url(mock_ctx, **params)
+            elif tool_name == "get_available_sources":
+                result = await get_available_sources(mock_ctx)
+            elif tool_name == "perform_rag_query":
+                result = await perform_rag_query(mock_ctx, **params)
+            elif tool_name == "scan_github_repo":
+                result = await scan_github_repo(mock_ctx, **params)
+            elif tool_name == "scan_github_source_code":
+                result = await scan_github_source_code(mock_ctx, **params)
+            else:
+                raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
+
+            return {"result": result}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Error invoking tool {tool_name}: {str(e)}")
+        logger.error(f"Error invoking tool {tool_name}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/crawl")
 async def crawl_endpoint(request: CrawlRequest):
+    """Crawl a URL and store in Supabase."""
     try:
-        result = await mcp.call_tool("smart_crawl_url", {
-            "url": request.url
-        })
+        logger.info(f"Crawl endpoint called for URL: {request.url}")
+        result = await invoke_tool("smart_crawl_url", {"url": request.url})
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error in crawl endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/search")
 async def search_endpoint(request: SearchRequest):
+    """Search stored documents using RAG."""
     try:
-        result = await mcp.call_tool("perform_rag_query", {
+        logger.info(f"Search endpoint called with query: {request.query}")
+        result = await invoke_tool("perform_rag_query", {
             "query": request.query,
             "match_count": request.match_count
         })
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error in search endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/scan_github")
 async def scan_github_endpoint(request: GitHubScanRequest):
+    """Scan a GitHub repository for markdown documentation."""
     try:
-        result = await mcp.call_tool("scan_github_repo", {
+        logger.info(f"GitHub scan endpoint called for {request.repo_owner}/{request.repo_name}")
+        result = await invoke_tool("scan_github_repo", {
             "repo_owner": request.repo_owner,
             "repo_name": request.repo_name
         })
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error in GitHub scan endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/scan_github_source_code")
 async def scan_github_source_code_endpoint(request: GitHubScanRequest):
+    """Scan a GitHub repository for source code."""
     try:
-        result = await mcp.call_tool("scan_github_source_code", {
+        logger.info(f"GitHub source code scan endpoint called for {request.repo_owner}/{request.repo_name}")
+        result = await invoke_tool("scan_github_source_code", {
             "repo_owner": request.repo_owner,
             "repo_name": request.repo_name
         })
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error in GitHub source code scan endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint to validate all system dependencies.
+    """
+    from utils import validate_ollama_connection, validate_supabase_connection
+
+    health_status = {
+        "status": "healthy",
+        "timestamp": asyncio.get_event_loop().time(),
+        "components": {}
+    }
+
+    # Check Supabase connection
+    try:
+        supabase_client = get_supabase_client()
+        supabase_ok = validate_supabase_connection(supabase_client)
+        health_status["components"]["supabase"] = {
+            "status": "healthy" if supabase_ok else "unhealthy",
+            "url": os.getenv("SUPABASE_URL", "not_set")
+        }
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["components"]["supabase"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+    # Check Ollama connection
+    ollama_ok = validate_ollama_connection()
+    health_status["components"]["ollama"] = {
+        "status": "healthy" if ollama_ok else "degraded",
+        "url": os.getenv("OLLAMA_BASE_URL", "not_set"),
+        "model": os.getenv("OLLAMA_MODEL", "not_set"),
+        "note": "Will use fallback embeddings if unavailable"
+    }
+
+    # Check crawler status (basic check)
+    health_status["components"]["crawler"] = {
+        "status": "healthy",
+        "browser": "chromium"
+    }
+
+    # Set overall status based on critical components
+    if health_status["components"]["supabase"]["status"] == "unhealthy":
+        health_status["status"] = "unhealthy"
+    elif health_status["components"]["ollama"]["status"] == "degraded":
+        health_status["status"] = "degraded"
+
+    status_code = 200 if health_status["status"] in ["healthy", "degraded"] else 503
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=health_status, status_code=status_code)
 
 
 @app.get("/openapi.json")
