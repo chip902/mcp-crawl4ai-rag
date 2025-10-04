@@ -99,7 +99,9 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
 mcp = FastMCP(
     "mcp-crawl4ai-rag",
     description="MCP server for RAG and web crawling with Crawl4AI",
-    lifespan=crawl4ai_lifespan
+    lifespan=crawl4ai_lifespan,
+    host=os.getenv("HOST", "0.0.0.0"),
+    port=int(os.getenv("PORT", "8051"))
 )
 
 
@@ -1069,10 +1071,8 @@ async def main():
     transport = os.getenv("TRANSPORT", "sse")
     if transport == 'sse':
         # Run the MCP server with sse transport
-        host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", "8051"))
-        logging.info(f"Starting MCP server with SSE transport on {host}:{port}")
-        await mcp.run_sse_async(host=host, port=port)
+        logging.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
+        await mcp.run_sse_async()
     else:
         # Run FastAPI server
         config = uvicorn.Config(
