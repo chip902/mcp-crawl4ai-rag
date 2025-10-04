@@ -26,10 +26,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 
 # Load environment variables from the project root .env file
 project_root = Path(__file__).resolve().parent.parent
@@ -38,8 +34,9 @@ dotenv_path = project_root / '.env'
 # Force override of existing environment variables
 load_dotenv(dotenv_path, override=True)
 
-
 # Create a dataclass for our application context
+
+
 @dataclass
 class Crawl4AIContext:
     """Context for the Crawl4AI MCP server."""
@@ -68,19 +65,10 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
 
     # Initialize the crawler
     crawler = AsyncWebCrawler(config=browser_config)
-    try:
-        await crawler.__aenter__()
-    except Exception as exc:
-        logging.error(f"Error initializing crawler: {exc}")
-        raise
+    await crawler.__aenter__()
 
     # Initialize Supabase client
-    try:
-        supabase_client = get_supabase_client()
-    except Exception as exc:
-        logging.error(f"Error initializing Supabase client: {exc}")
-        await crawler.__aexit__(None, None, None)
-        raise
+    supabase_client = get_supabase_client()
 
     try:
         yield Crawl4AIContext(
@@ -89,11 +77,7 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
         )
     finally:
         # Clean up the crawler
-        try:
-            await crawler.__aexit__(None, None, None)
-        except Exception as exc:
-            logging.error(f"Error cleaning up crawler: {exc}")
-
+        await crawler.__aexit__(None, None, None)
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -342,8 +326,6 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     Returns:
         JSON string with crawl summary and storage information
     """
-    logging.info(f"Invoked smart_crawl_url with url: {url}, max_depth: {max_depth}, max_concurrent: {max_concurrent}, chunk_size: {chunk_size}")
-
     try:
         # Get the crawler and Supabase client from the context
         crawler = ctx.request_context.lifespan_context.crawler
@@ -405,6 +387,8 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 meta["crawl_type"] = crawl_type
                 meta["crawl_time"] = str(
                     asyncio.current_task().get_coro().__name__)
+                meta["crawl_time"] = str(
+                    asyncio.current_task().get_coro().__name__)
                 metadatas.append(meta)
 
                 chunk_count += 1
@@ -429,7 +413,6 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
             "urls_crawled": [doc['url'] for doc in crawl_results][:5] + (["..."] if len(crawl_results) > 5 else [])
         }, indent=2)
     except Exception as e:
-        logging.error(f"Error in smart_crawl_url: {e}")
         return json.dumps({
             "success": False,
             "url": url,
@@ -751,118 +734,6 @@ async def scan_github_repo(ctx: Context, repo_owner: str, repo_name: str) -> str
         }, indent=2)
 
 
-@mcp.tool()
-async def scan_github_source_code(ctx: Context, repo_owner: str, repo_name: str) -> str:
-    """
-    Scan a GitHub repository for source code files and store their content in Supabase.
-
-
-    This tool extracts source code files from a GitHub repository and stores them in Supabase
-    for later retrieval and querying. This provides valuable context for LLMs by including
-    implementation details, API usage examples, and architectural patterns.
-
-
-    Args:
-        ctx: The MCP server provided context
-        repo_owner: GitHub repository owner
-        repo_name: GitHub repository name
-
-
-    Returns:
-        JSON string with the scan results
-    """
-    try:
-        # Get the Supabase client from the context
-        supabase_client = ctx.request_context.lifespan_context.supabase_client
-
-        # Get source code file URLs from the GitHub repository
-        source_code_urls = await get_source_code_urls_from_github(repo_owner, repo_name)
-
-        if not source_code_urls:
-            return json.dumps({
-                "success": False,
-                "repo_owner": repo_owner,
-                "repo_name": repo_name,
-                "error": "No source code files found in the repository"
-            }, indent=2)
-
-        # Process results and store in Supabase
-        urls = []
-        chunk_numbers = []
-        contents = []
-        metadatas = []
-        chunk_count = 0
-
-        for doc in source_code_urls:
-            raw_url = doc['raw_url']
-            github_url = doc['github_url']
-
-            # Fetch the source code file directly (no crawling needed)
-            try:
-                response = requests.get(raw_url)
-                response.raise_for_status()
-                source_code = response.text
-            except Exception as e:
-                print(f"Error fetching source code from {raw_url}: {e}")
-                continue
-
-            if source_code:
-                # Chunk the content
-                chunks = smart_chunk_markdown(source_code)
-
-                for i, chunk in enumerate(chunks):
-                    urls.append(github_url)
-                    chunk_numbers.append(i)
-                    contents.append(chunk)
-
-                    # Extract metadata
-                    meta = extract_section_info(chunk)
-                    meta["chunk_index"] = i
-                    meta["url"] = github_url
-                    meta["source"] = urlparse(github_url).netloc
-                    meta["crawl_type"] = "github_source_code"
-                    meta["file_extension"] = os.path.splitext(urlparse(github_url).path)[1]
-                    meta["crawl_time"] = str(
-                        asyncio.current_task().get_coro().__name__)
-                    metadatas.append(meta)
-
-                    chunk_count += 1
-
-        # Create url_to_full_document mapping
-        url_to_full_document = {}
-        for doc in source_code_urls:
-            raw_url = doc['raw_url']
-            try:
-                response = requests.get(raw_url)
-                response.raise_for_status()
-                url_to_full_document[doc['github_url']] = response.text
-            except Exception as e:
-                print(f"Error fetching source code from {raw_url}: {e}")
-                url_to_full_document[doc['github_url']] = ""
-
-        # Add to Supabase
-        # IMPORTANT: Adjust this batch size for more speed if you want! Just don't overwhelm your system or the embedding API ;)
-        batch_size = 20
-        add_documents_to_supabase(supabase_client, urls, chunk_numbers,
-                                  contents, metadatas, url_to_full_document, batch_size=batch_size)
-
-        return json.dumps({
-            "success": True,
-            "repo_owner": repo_owner,
-            "repo_name": repo_name,
-            "source_code_files": len(source_code_urls),
-            "chunks_stored": chunk_count,
-            "urls_crawled": [doc['github_url'] for doc in source_code_urls][:5] + (["..."] if len(source_code_urls) > 5 else [])
-        }, indent=2)
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "repo_owner": repo_owner,
-            "repo_name": repo_name,
-            "error": str(e)
-        }, indent=2)
-
-
 async def get_docs_urls_from_github(repo_owner: str, repo_name: str) -> List[str]:
     """
     Pulls doc URLs from a GitHub repository.
@@ -909,66 +780,6 @@ async def get_docs_urls_from_github(repo_owner: str, repo_name: str) -> List[str
         return []
 
 
-async def get_source_code_urls_from_github(repo_owner: str, repo_name: str) -> List[str]:
-    """
-    Pulls source code URLs from a GitHub repository.
-    """
-    # Set up API credentials (if you have them)
-    api_token = os.getenv("GITHUB_TOKEN")
-    headers = {"Accept": "application/vnd.github.v3+json"}
-
-    if api_token:
-        headers["Authorization"] = f"Bearer {api_token}"
-    else:
-        print("No GitHub token provided. Fetching without authentication.")
-
-    tree_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/git/trees/main?recursive=1"
-
-    try:
-        response = requests.get(tree_url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-
-        source_code_urls = []
-
-        # Check if we have a tree in the response
-        if "tree" not in data:
-            print(f"No tree found in response: {data}")
-            return source_code_urls
-
-        # Common source code file extensions
-        source_extensions = {
-            '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h',
-            '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala',
-            '.sql', '.sh', '.pl', '.pm', '.r', '.m', '.mm', '.dart', '.lua',
-            '.groovy', '.clj', '.cljs', '.ex', '.exs', '.erl', '.hrl', '.fs',
-            '.fsx', '.ml', '.mli', '.hs', '.lhs', '.coffee', '.elm', '.jl',
-            '.nim', '.cr', '.v', '.zig', '.f', '.f90', '.f95', '.ada', '.adb',
-            '.ads', '.pas', '.d', '.vala', '.purs', '.idr', '.agda', '.lean'
-        }
-
-        # Find source code files in the repository
-        for item in data["tree"]:
-            if item["type"] == "blob":
-                # Check if the file has a source code extension
-                _, ext = os.path.splitext(item["path"])
-                if ext.lower() in source_extensions:
-                    # Use the raw content URL for direct access to the file
-                    raw_url = f"https://raw.githubusercontent.com/{repo_owner}/{repo_name}/main/{item['path']}"
-                    # Use the GitHub UI URL for displaying in the results
-                    github_url = f"https://github.com/{repo_owner}/{repo_name}/blob/main/{item['path']}"
-
-                    source_code_urls.append(
-                        {"raw_url": raw_url, "github_url": github_url})
-                    print(f"Found source code file: {github_url}")
-
-        return source_code_urls
-
-    except Exception as e:
-        print(f"Error fetching GitHub tree or file: {str(e)}")
-        return []
-
-
 # Initialize FastAPI app
 app = FastAPI(
     title="Crawl4AI MCP Server",
@@ -1001,14 +812,6 @@ class GitHubScanRequest(BaseModel):
     repo_owner: str
     repo_name: str
 
-@app.post("/invoke_tool")
-async def invoke_tool(tool_name: str, params: Dict[str, Any]):
-    try:
-        result = await mcp.call_tool(tool_name, params)
-        return result
-    except Exception as e:
-        logging.error(f"Error invoking tool {tool_name}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/crawl")
 async def crawl_endpoint(request: CrawlRequest):
@@ -1045,18 +848,6 @@ async def scan_github_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/scan_github_source_code")
-async def scan_github_source_code_endpoint(request: GitHubScanRequest):
-    try:
-        result = await mcp.call_tool("scan_github_source_code", {
-            "repo_owner": request.repo_owner,
-            "repo_name": request.repo_name
-        })
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/openapi.json")
 async def get_openapi():
     openapi_spec = app.openapi()
@@ -1071,7 +862,7 @@ async def main():
         # Run the MCP server with sse transport
         host = os.getenv("HOST", "0.0.0.0")
         port = int(os.getenv("PORT", "8051"))
-        logging.info(f"Starting MCP server with SSE transport on {host}:{port}")
+        print(f"Starting MCP server with SSE transport on {host}:{port}")
         await mcp.run_sse_async(host=host, port=port)
     else:
         # Run FastAPI server

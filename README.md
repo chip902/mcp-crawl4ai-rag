@@ -30,12 +30,12 @@ The Crawl4AI RAG MCP server is just the beginning. Here's where we're headed:
 
 ## Features
 
-- **Smart URL Detection**: Automatically detects and handles different URL types (regular webpages, sitemaps, text files)
-- **Recursive Crawling**: Follows internal links to discover content
-- **Parallel Processing**: Efficiently crawls multiple pages simultaneously
-- **Content Chunking**: Intelligently splits content by headers and size for better processing
-- **Vector Search**: Performs RAG over crawled content, optionally filtering by data source for precision
-- **Source Retrieval**: Retrieve sources available for filtering to guide the RAG process
+-   **Smart URL Detection**: Automatically detects and handles different URL types (regular webpages, sitemaps, text files)
+-   **Recursive Crawling**: Follows internal links to discover content
+-   **Parallel Processing**: Efficiently crawls multiple pages simultaneously
+-   **Content Chunking**: Intelligently splits content by headers and size for better processing
+-   **Vector Search**: Performs RAG over crawled content, optionally filtering by data source for precision
+-   **Source Retrieval**: Retrieve sources available for filtering to guide the RAG process
 
 ## Tools
 
@@ -48,53 +48,59 @@ The server provides four essential web crawling and search tools:
 
 ## Prerequisites
 
-- [Docker/Docker Desktop](https://www.docker.com/products/docker-desktop/) if running the MCP server as a container (recommended)
-- [Python 3.12+](https://www.python.org/downloads/) if running the MCP server directly through uv
-- [Supabase](https://supabase.com/) (database for RAG)
-- [OpenAI API key](https://platform.openai.com/api-keys) (for generating embeddings)
+-   [Docker/Docker Desktop](https://www.docker.com/products/docker-desktop/) if running the MCP server as a container (recommended)
+-   [Python 3.12+](https://www.python.org/downloads/) if running the MCP server directly through uv
+-   [Supabase](https://supabase.com/) (database for RAG)
+-   [OpenAI API key](https://platform.openai.com/api-keys) (for generating embeddings)
 
 ## Installation
 
 ### Using Docker (Recommended)
 
 1. Clone this repository:
-   ```bash
-   git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
-   cd mcp-crawl4ai-rag
-   ```
+
+    ```bash
+    git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
+    cd mcp-crawl4ai-rag
+    ```
 
 2. Build the Docker image:
-   ```bash
-   docker build -t mcp/crawl4ai-rag --build-arg PORT=8051 .
-   ```
+
+    ```bash
+    docker build -t mcp/crawl4ai-rag --build-arg PORT=8051 .
+    ```
 
 3. Create a `.env` file based on the configuration section below
 
 ### Using uv directly (no Docker)
 
 1. Clone this repository:
-   ```bash
-   git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
-   cd mcp-crawl4ai-rag
-   ```
+
+    ```bash
+    git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
+    cd mcp-crawl4ai-rag
+    ```
 
 2. Install uv if you don't have it:
-   ```bash
-   pip install uv
-   ```
+
+    ```bash
+    pip install uv
+    ```
 
 3. Create and activate a virtual environment:
-   ```bash
-   uv venv
-   .venv\Scripts\activate
-   # on Mac/Linux: source .venv/bin/activate
-   ```
+
+    ```bash
+    uv venv
+    .venv\Scripts\activate
+    # on Mac/Linux: source .venv/bin/activate
+    ```
 
 4. Install dependencies:
-   ```bash
-   uv pip install -e .
-   crawl4ai-setup
-   ```
+
+    ```bash
+    uv pip install -e .
+    crawl4ai-setup
+    ```
 
 5. Create a `.env` file based on the configuration section below
 
@@ -131,7 +137,7 @@ SUPABASE_SERVICE_KEY=your_supabase_service_key
 ### Using Docker
 
 ```bash
-docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+docker run --env-file .env -d --name crawl4ai-rag -p 8051:8051 mcp/crawl4ai-rag
 ```
 
 ### Using Python
@@ -150,24 +156,25 @@ Once you have the server running with SSE transport, you can connect to it using
 
 ```json
 {
-  "mcpServers": {
-    "crawl4ai-rag": {
-      "transport": "sse",
-      "url": "http://localhost:8051/sse"
-    }
-  }
+	"mcpServers": {
+		"crawl4ai-rag": {
+			"transport": "sse",
+			"url": "http://localhost:8051/sse"
+		}
+	}
 }
 ```
 
 > **Note for Windsurf users**: Use `serverUrl` instead of `url` in your configuration:
+>
 > ```json
 > {
->   "mcpServers": {
->     "crawl4ai-rag": {
->       "transport": "sse",
->       "serverUrl": "http://localhost:8051/sse"
->     }
->   }
+> 	"mcpServers": {
+> 		"crawl4ai-rag": {
+> 			"transport": "sse",
+> 			"serverUrl": "http://localhost:8051/sse"
+> 		}
+> 	}
 > }
 > ```
 >
@@ -179,18 +186,18 @@ Add this server to your MCP configuration for Claude Desktop, Windsurf, or any o
 
 ```json
 {
-  "mcpServers": {
-    "crawl4ai-rag": {
-      "command": "python",
-      "args": ["path/to/crawl4ai-mcp/src/crawl4ai_mcp.py"],
-      "env": {
-        "TRANSPORT": "stdio",
-        "OPENAI_API_KEY": "your_openai_api_key",
-        "SUPABASE_URL": "your_supabase_url",
-        "SUPABASE_SERVICE_KEY": "your_supabase_service_key"
-      }
-    }
-  }
+	"mcpServers": {
+		"crawl4ai-rag": {
+			"command": "python",
+			"args": ["path/to/crawl4ai-mcp/src/crawl4ai_mcp.py"],
+			"env": {
+				"TRANSPORT": "stdio",
+				"OPENAI_API_KEY": "your_openai_api_key",
+				"SUPABASE_URL": "your_supabase_url",
+				"SUPABASE_SERVICE_KEY": "your_supabase_service_key"
+			}
+		}
+	}
 }
 ```
 
@@ -198,23 +205,18 @@ Add this server to your MCP configuration for Claude Desktop, Windsurf, or any o
 
 ```json
 {
-  "mcpServers": {
-    "crawl4ai-rag": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i", 
-               "-e", "TRANSPORT", 
-               "-e", "OPENAI_API_KEY", 
-               "-e", "SUPABASE_URL", 
-               "-e", "SUPABASE_SERVICE_KEY", 
-               "mcp/crawl4ai"],
-      "env": {
-        "TRANSPORT": "stdio",
-        "OPENAI_API_KEY": "your_openai_api_key",
-        "SUPABASE_URL": "your_supabase_url",
-        "SUPABASE_SERVICE_KEY": "your_supabase_service_key"
-      }
-    }
-  }
+	"mcpServers": {
+		"crawl4ai-rag": {
+			"command": "docker",
+			"args": ["run", "--rm", "-i", "-e", "TRANSPORT", "-e", "OPENAI_API_KEY", "-e", "SUPABASE_URL", "-e", "SUPABASE_SERVICE_KEY", "mcp/crawl4ai"],
+			"env": {
+				"TRANSPORT": "stdio",
+				"OPENAI_API_KEY": "your_openai_api_key",
+				"SUPABASE_URL": "your_supabase_url",
+				"SUPABASE_SERVICE_KEY": "your_supabase_service_key"
+			}
+		}
+	}
 }
 ```
 
