@@ -183,6 +183,9 @@ mcp.app.add_middleware(
     allow_headers=["*"],
 )
 
+# Store reference to the mcp app for route registration
+app = mcp.app
+
 
 def is_sitemap(url: str) -> bool:
     """
@@ -1121,7 +1124,7 @@ class GitHubScanRequest(BaseModel):
     repo_owner: str
     repo_name: str
 
-@mcp.app.post("/invoke_tool")
+@app.post("/invoke_tool")
 async def invoke_tool(tool_name: str, params: Dict[str, Any]):
     """
     Generic tool invocation endpoint with proper context management.
@@ -1166,7 +1169,7 @@ async def invoke_tool(tool_name: str, params: Dict[str, Any]):
         logger.error(f"Error invoking tool {tool_name}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@mcp.app.post("/crawl")
+@app.post("/crawl")
 async def crawl_endpoint(request: CrawlRequest):
     """Crawl a URL and store in Supabase."""
     try:
@@ -1180,7 +1183,7 @@ async def crawl_endpoint(request: CrawlRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@mcp.app.post("/search")
+@app.post("/search")
 async def search_endpoint(request: SearchRequest):
     """Search stored documents using RAG."""
     try:
@@ -1197,7 +1200,7 @@ async def search_endpoint(request: SearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@mcp.app.post("/scan_github")
+@app.post("/scan_github")
 async def scan_github_endpoint(request: GitHubScanRequest):
     """Scan a GitHub repository for markdown documentation."""
     try:
@@ -1214,7 +1217,7 @@ async def scan_github_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@mcp.app.post("/scan_github_source_code")
+@app.post("/scan_github_source_code")
 async def scan_github_source_code_endpoint(request: GitHubScanRequest):
     """Scan a GitHub repository for source code."""
     try:
@@ -1231,7 +1234,7 @@ async def scan_github_source_code_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@mcp.app.get("/health")
+@app.get("/health")
 async def health_check():
     """
     Health check endpoint to validate all system dependencies.
@@ -1286,9 +1289,9 @@ async def health_check():
     return JSONResponse(content=health_status, status_code=status_code)
 
 
-@mcp.app.get("/openapi.json")
+@app.get("/openapi.json")
 async def get_openapi():
-    openapi_spec = mcp.app.openapi()
+    openapi_spec = app.openapi()
     return openapi_spec
 
 # Update main function to use FastAPI
