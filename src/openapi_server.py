@@ -10,6 +10,7 @@ import logging
 import json
 import asyncio
 from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -44,14 +45,58 @@ logger = logging.getLogger(__name__)
 supabase_client = None
 crawler = None
 
-# FastAPI app
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown"""
+    global supabase_client, crawler
+
+    # Startup
+    logger.info("Starting OpenAPI server...")
+    try:
+        # Initialize Supabase client
+        supabase_client = get_supabase_client()
+        if not validate_supabase_connection(supabase_client):
+            logger.error("Supabase connection validation failed")
+            raise RuntimeError("Supabase connection failed")
+
+        # Validate Ollama
+        if not validate_ollama_connection():
+            logger.warning("Ollama connection validation failed - embeddings may not work")
+
+        # Initialize crawler
+        browser_config = BrowserConfig(
+            headless=True,
+            verbose=False
+        )
+        crawler = AsyncWebCrawler(config=browser_config)
+        await crawler.__aenter__()
+
+        logger.info("All connections validated successfully")
+        logger.info(f"OpenAPI docs available at: http://0.0.0.0:8082/docs")
+        logger.info(f"OpenAPI spec available at: http://0.0.0.0:8082/openapi.json")
+
+    except Exception as e:
+        logger.error(f"Startup validation failed: {e}")
+        raise
+
+    yield
+
+    # Shutdown
+    if crawler:
+        await crawler.__aexit__(None, None, None)
+        logger.info("Crawler closed")
+
+
+# FastAPI app with lifespan
 app = FastAPI(
     title="Crawl4AI RAG API",
     description="Web crawling and RAG query API for documentation knowledge base",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    openapi_url="/openapi.json",
+    lifespan=lifespan
 )
 
 # CORS middleware for Open-WebUI
@@ -98,49 +143,6 @@ class SourcesResponse(BaseModel):
     success: bool
     sources: List[str]
     count: int
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize crawler and validate connections on startup"""
-    global supabase_client, crawler
-    logger.info("Starting OpenAPI server...")
-
-    try:
-        # Initialize Supabase client
-        supabase_client = get_supabase_client()
-        if not validate_supabase_connection():
-            logger.error("Supabase connection validation failed")
-            raise RuntimeError("Supabase connection failed")
-
-        # Validate Ollama
-        if not validate_ollama_connection():
-            logger.warning("Ollama connection validation failed - embeddings may not work")
-
-        # Initialize crawler
-        browser_config = BrowserConfig(
-            headless=True,
-            verbose=False
-        )
-        crawler = AsyncWebCrawler(config=browser_config)
-        await crawler.__aenter__()
-
-        logger.info("All connections validated successfully")
-        logger.info(f"OpenAPI docs available at: http://0.0.0.0:8081/docs")
-        logger.info(f"OpenAPI spec available at: http://0.0.0.0:8081/openapi.json")
-
-    except Exception as e:
-        logger.error(f"Startup validation failed: {e}")
-        raise
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    global crawler
-    if crawler:
-        await crawler.__aexit__(None, None, None)
-        logger.info("Crawler closed")
 
 
 @app.get("/")
