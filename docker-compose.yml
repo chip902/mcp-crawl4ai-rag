@@ -19,11 +19,11 @@ services:
         networks:
             - app_network
         healthcheck:
-            test: ["CMD", "curl", "-f", "http://localhost:8051/health"]
+            test: ["CMD", "curl", "-f", "http://localhost:8051/sse"]
             interval: 30s
             timeout: 10s
-            retries: 3
-            start_period: 40s
+            retries: 5
+            start_period: 60s
         restart: unless-stopped
         extra_hosts:
             - "host.docker.internal:host-gateway"
@@ -33,8 +33,7 @@ services:
         ports:
             - "8080:8080"
         depends_on:
-            mcp-server:
-                condition: service_healthy
+            - mcp-server
         networks:
             - app_network
         restart: unless-stopped
