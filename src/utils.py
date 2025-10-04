@@ -44,7 +44,14 @@ def validate_ollama_connection() -> bool:
         models = response.json().get("models", [])
         model_names = [m.get("name", "") for m in models]
 
-        if OLLAMA_MODEL not in model_names:
+        # Check for exact match or base name match (e.g., "nomic-embed-text" matches "nomic-embed-text:latest")
+        model_found = False
+        for model_name in model_names:
+            if OLLAMA_MODEL == model_name or OLLAMA_MODEL == model_name.split(':')[0]:
+                model_found = True
+                break
+
+        if not model_found:
             logger.warning(f"Model {OLLAMA_MODEL} not found in Ollama. Available models: {model_names}")
             logger.warning("Embeddings will use fallback mode")
             return False

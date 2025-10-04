@@ -106,6 +106,23 @@ except Exception as e:
     # Don't raise here - let the server start but log the error
 
 
+# Initialize FastAPI app first (needed for MCP initialization)
+app = FastAPI(
+    title="Crawl4AI MCP Server",
+    description="A server for web crawling and document processing using Crawl4AI",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 # Create a dataclass for our application context
 @dataclass
 class Crawl4AIContext:
@@ -162,13 +179,14 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
             logging.error(f"Error cleaning up crawler: {exc}")
 
 
-# Initialize FastMCP server
+# Initialize FastMCP server with custom app
 mcp = FastMCP(
     "mcp-crawl4ai-rag",
     description="MCP server for RAG and web crawling with Crawl4AI",
     lifespan=crawl4ai_lifespan,
     host=os.getenv("HOST", "0.0.0.0"),
-    port=int(os.getenv("PORT", "8051"))
+    port=int(os.getenv("PORT", "8051")),
+    app=app  # Use our FastAPI app with health endpoint
 )
 
 
@@ -1093,22 +1111,6 @@ async def get_source_code_urls_from_github(repo_owner: str, repo_name: str) -> L
         return []
 
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Crawl4AI MCP Server",
-    description="A server for web crawling and document processing using Crawl4AI",
-    version="1.0.0"
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Define request/response models
 
 
@@ -1298,22 +1300,29 @@ async def get_openapi():
 # Update main function to use FastAPI
 
 
+async def run_health_server():
+    """Run a simple health check server alongside the MCP server."""
+    config = uvicorn.Config(
+        app=app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8051")),
+        log_level="warning"  # Suppress verbose logs
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
 async def main():
     transport = os.getenv("TRANSPORT", "sse")
     if transport == 'sse':
         # Run the MCP server with sse transport
-        logging.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
+        # Note: FastMCP already runs its own uvicorn server which includes our app routes
+        logger.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
         await mcp.run_sse_async()
     else:
-        # Run FastAPI server
-        config = uvicorn.Config(
-            app=app,
-            host="0.0.0.0",
-            port=8000,
-            log_level="info"
-        )
-        server = uvicorn.Server(config)
-        await server.serve()
+        # Run standalone FastAPI server
+        logger.info("Starting standalone FastAPI server")
+        await run_health_server()
 
 if __name__ == "__main__":
     asyncio.run(main())
