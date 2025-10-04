@@ -106,21 +106,7 @@ except Exception as e:
     # Don't raise here - let the server start but log the error
 
 
-# Initialize FastAPI app first (needed for MCP initialization)
-app = FastAPI(
-    title="Crawl4AI MCP Server",
-    description="A server for web crawling and document processing using Crawl4AI",
-    version="1.0.0"
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# FastAPI app will be created by FastMCP - we'll add routes to mcp.app later
 
 
 # Create a dataclass for our application context
@@ -179,14 +165,22 @@ async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
             logging.error(f"Error cleaning up crawler: {exc}")
 
 
-# Initialize FastMCP server with custom app
+# Initialize FastMCP server
 mcp = FastMCP(
     "mcp-crawl4ai-rag",
     description="MCP server for RAG and web crawling with Crawl4AI",
     lifespan=crawl4ai_lifespan,
     host=os.getenv("HOST", "0.0.0.0"),
-    port=int(os.getenv("PORT", "8051")),
-    app=app  # Use our FastAPI app with health endpoint
+    port=int(os.getenv("PORT", "8051"))
+)
+
+# Add CORS middleware to MCP's app
+mcp.app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -1127,7 +1121,7 @@ class GitHubScanRequest(BaseModel):
     repo_owner: str
     repo_name: str
 
-@app.post("/invoke_tool")
+@mcp.app.post("/invoke_tool")
 async def invoke_tool(tool_name: str, params: Dict[str, Any]):
     """
     Generic tool invocation endpoint with proper context management.
@@ -1172,7 +1166,7 @@ async def invoke_tool(tool_name: str, params: Dict[str, Any]):
         logger.error(f"Error invoking tool {tool_name}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/crawl")
+@mcp.app.post("/crawl")
 async def crawl_endpoint(request: CrawlRequest):
     """Crawl a URL and store in Supabase."""
     try:
@@ -1186,7 +1180,7 @@ async def crawl_endpoint(request: CrawlRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/search")
+@mcp.app.post("/search")
 async def search_endpoint(request: SearchRequest):
     """Search stored documents using RAG."""
     try:
@@ -1203,7 +1197,7 @@ async def search_endpoint(request: SearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/scan_github")
+@mcp.app.post("/scan_github")
 async def scan_github_endpoint(request: GitHubScanRequest):
     """Scan a GitHub repository for markdown documentation."""
     try:
@@ -1220,7 +1214,7 @@ async def scan_github_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/scan_github_source_code")
+@mcp.app.post("/scan_github_source_code")
 async def scan_github_source_code_endpoint(request: GitHubScanRequest):
     """Scan a GitHub repository for source code."""
     try:
@@ -1237,7 +1231,7 @@ async def scan_github_source_code_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/health")
+@mcp.app.get("/health")
 async def health_check():
     """
     Health check endpoint to validate all system dependencies.
@@ -1292,37 +1286,32 @@ async def health_check():
     return JSONResponse(content=health_status, status_code=status_code)
 
 
-@app.get("/openapi.json")
+@mcp.app.get("/openapi.json")
 async def get_openapi():
-    openapi_spec = app.openapi()
+    openapi_spec = mcp.app.openapi()
     return openapi_spec
 
 # Update main function to use FastAPI
-
-
-async def run_health_server():
-    """Run a simple health check server alongside the MCP server."""
-    config = uvicorn.Config(
-        app=app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8051")),
-        log_level="warning"  # Suppress verbose logs
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
 
 
 async def main():
     transport = os.getenv("TRANSPORT", "sse")
     if transport == 'sse':
         # Run the MCP server with sse transport
-        # Note: FastMCP already runs its own uvicorn server which includes our app routes
+        # FastMCP's uvicorn server includes our custom routes added to mcp.app
         logger.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
         await mcp.run_sse_async()
     else:
         # Run standalone FastAPI server
         logger.info("Starting standalone FastAPI server")
-        await run_health_server()
+        config = uvicorn.Config(
+            app=mcp.app,
+            host="0.0.0.0",
+            port=int(os.getenv("PORT", "8051")),
+            log_level="info"
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
 
 if __name__ == "__main__":
     asyncio.run(main())
