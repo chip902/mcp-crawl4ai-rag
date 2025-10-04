@@ -1093,8 +1093,13 @@ async def get_source_code_urls_from_github(repo_owner: str, repo_name: str) -> L
 
 
 
-if __name__ == "__main__":
-    # Run MCP server (SSE transport with MCP tools)
+async def main():
+    """Main entry point for MCP server."""
     logger.info(f"Starting MCP server on {mcp.settings.host}:{mcp.settings.port}")
     logger.info("Available MCP tools: smart_crawl_url, perform_rag_query, get_available_sources, scan_github_repo")
-    mcp.run()
+    await mcp.run_sse_async()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
