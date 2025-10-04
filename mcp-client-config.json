@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "crawl4ai-rag": {
+      "url": "http://192.168.1.10:8051/sse",
+      "transport": {
+        "type": "sse"
+      }
+    }
+  }
+}

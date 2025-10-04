@@ -28,15 +28,34 @@ services:
         extra_hosts:
             - "host.docker.internal:host-gateway"
 
-    mcpo-proxy:
-        build: .
+    openapi-server:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        image: mcp/crawl4ai-rag:latest
+        command: python src/openapi_server.py
         ports:
-            - "8080:8080"
-        depends_on:
-            - mcp-server
+            - "8081:8081"
+        environment:
+            - HOST=0.0.0.0
+            - OPENAPI_PORT=8081
+            - OLLAMA_BASE_URL=http://192.168.1.10:11434
+            - OLLAMA_MODEL=nomic-embed-text
+            - MODEL_CHOICE=nomic-embed-text
+            - SUPABASE_URL=http://192.168.1.10:8000
+            - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+            - GITHUB_TOKEN=${GITHUB_TOKEN}
         networks:
             - app_network
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+            start_period: 60s
         restart: unless-stopped
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
 
 networks:
     app_network:
