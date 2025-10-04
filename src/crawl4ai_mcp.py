@@ -22,8 +22,7 @@ import re
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from utils import get_supabase_client, add_documents_to_supabase, search_documents
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
 from pydantic import BaseModel
 import uvicorn
 import logging
@@ -106,9 +105,6 @@ except Exception as e:
     # Don't raise here - let the server start but log the error
 
 
-# FastAPI app will be created by FastMCP - we'll add routes to mcp.app later
-
-
 # Create a dataclass for our application context
 @dataclass
 class Crawl4AIContext:
@@ -173,18 +169,6 @@ mcp = FastMCP(
     host=os.getenv("HOST", "0.0.0.0"),
     port=int(os.getenv("PORT", "8051"))
 )
-
-# Add CORS middleware to MCP's app
-mcp.app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Store reference to the mcp app for route registration
-app = mcp.app
 
 
 def is_sitemap(url: str) -> bool:
@@ -1124,7 +1108,7 @@ class GitHubScanRequest(BaseModel):
     repo_owner: str
     repo_name: str
 
-@app.post("/invoke_tool")
+@mcp.post("/invoke_tool")
 async def invoke_tool(tool_name: str, params: Dict[str, Any]):
     """
     Generic tool invocation endpoint with proper context management.
@@ -1169,7 +1153,7 @@ async def invoke_tool(tool_name: str, params: Dict[str, Any]):
         logger.error(f"Error invoking tool {tool_name}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/crawl")
+@mcp.post("/crawl")
 async def crawl_endpoint(request: CrawlRequest):
     """Crawl a URL and store in Supabase."""
     try:
@@ -1183,7 +1167,7 @@ async def crawl_endpoint(request: CrawlRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/search")
+@mcp.post("/search")
 async def search_endpoint(request: SearchRequest):
     """Search stored documents using RAG."""
     try:
@@ -1200,7 +1184,7 @@ async def search_endpoint(request: SearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/scan_github")
+@mcp.post("/scan_github")
 async def scan_github_endpoint(request: GitHubScanRequest):
     """Scan a GitHub repository for markdown documentation."""
     try:
@@ -1217,7 +1201,7 @@ async def scan_github_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/scan_github_source_code")
+@mcp.post("/scan_github_source_code")
 async def scan_github_source_code_endpoint(request: GitHubScanRequest):
     """Scan a GitHub repository for source code."""
     try:
@@ -1234,7 +1218,7 @@ async def scan_github_source_code_endpoint(request: GitHubScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/health")
+@mcp.get("/health")
 async def health_check():
     """
     Health check endpoint to validate all system dependencies.
@@ -1289,32 +1273,12 @@ async def health_check():
     return JSONResponse(content=health_status, status_code=status_code)
 
 
-@app.get("/openapi.json")
-async def get_openapi():
-    openapi_spec = app.openapi()
-    return openapi_spec
+# Note: OpenAPI spec is automatically available at /openapi.json via FastMCP
 
 # Update main function to use FastAPI
 
 
-async def main():
-    transport = os.getenv("TRANSPORT", "sse")
-    if transport == 'sse':
-        # Run the MCP server with sse transport
-        # FastMCP's uvicorn server includes our custom routes added to mcp.app
-        logger.info(f"Starting MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}")
-        await mcp.run_sse_async()
-    else:
-        # Run standalone FastAPI server
-        logger.info("Starting standalone FastAPI server")
-        config = uvicorn.Config(
-            app=mcp.app,
-            host="0.0.0.0",
-            port=int(os.getenv("PORT", "8051")),
-            log_level="info"
-        )
-        server = uvicorn.Server(config)
-        await server.serve()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    # FastMCP handles both SSE and custom HTTP endpoints
+    logger.info(f"Starting MCP server on {mcp.settings.host}:{mcp.settings.port}")
+    mcp.run()
