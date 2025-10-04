@@ -22,9 +22,6 @@ import re
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from utils import get_supabase_client, add_documents_to_supabase, search_documents
-from fastapi import HTTPException
-from pydantic import BaseModel
-import uvicorn
 import logging
 import sys
 
@@ -169,6 +166,9 @@ mcp = FastMCP(
     host=os.getenv("HOST", "0.0.0.0"),
     port=int(os.getenv("PORT", "8051"))
 )
+
+# Note: HTTP endpoints removed - use MCP tools instead
+# The MCP tools (smart_crawl_url, perform_rag_query, etc.) are available via SSE transport
 
 
 def is_sitemap(url: str) -> bool:
@@ -1092,193 +1092,9 @@ async def get_source_code_urls_from_github(repo_owner: str, repo_name: str) -> L
         return []
 
 
-# Define request/response models
-
-
-class CrawlRequest(BaseModel):
-    url: str
-
-
-class SearchRequest(BaseModel):
-    query: str
-    match_count: int = 5
-
-
-class GitHubScanRequest(BaseModel):
-    repo_owner: str
-    repo_name: str
-
-@mcp.post("/invoke_tool")
-async def invoke_tool(tool_name: str, params: Dict[str, Any]):
-    """
-    Generic tool invocation endpoint with proper context management.
-    """
-    try:
-        logger.info(f"Invoking tool: {tool_name} with params: {params}")
-
-        # Create a mock context for HTTP endpoint calls
-        # This ensures the MCP tools can access the lifespan context
-        class MockContext:
-            def __init__(self, lifespan_ctx):
-                self.request_context = type('obj', (object,), {
-                    'lifespan_context': lifespan_ctx
-                })()
-
-        # Get the lifespan context from the MCP server
-        # Note: This assumes the MCP server's lifespan has been initialized
-        async with mcp._lifespan_manager() as lifespan_ctx:
-            mock_ctx = MockContext(lifespan_ctx)
-
-            # Map tool names to their corresponding functions
-            if tool_name == "crawl_single_page":
-                result = await crawl_single_page(mock_ctx, **params)
-            elif tool_name == "smart_crawl_url":
-                result = await smart_crawl_url(mock_ctx, **params)
-            elif tool_name == "get_available_sources":
-                result = await get_available_sources(mock_ctx)
-            elif tool_name == "perform_rag_query":
-                result = await perform_rag_query(mock_ctx, **params)
-            elif tool_name == "scan_github_repo":
-                result = await scan_github_repo(mock_ctx, **params)
-            elif tool_name == "scan_github_source_code":
-                result = await scan_github_source_code(mock_ctx, **params)
-            else:
-                raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
-
-            return {"result": result}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error invoking tool {tool_name}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@mcp.post("/crawl")
-async def crawl_endpoint(request: CrawlRequest):
-    """Crawl a URL and store in Supabase."""
-    try:
-        logger.info(f"Crawl endpoint called for URL: {request.url}")
-        result = await invoke_tool("smart_crawl_url", {"url": request.url})
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in crawl endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@mcp.post("/search")
-async def search_endpoint(request: SearchRequest):
-    """Search stored documents using RAG."""
-    try:
-        logger.info(f"Search endpoint called with query: {request.query}")
-        result = await invoke_tool("perform_rag_query", {
-            "query": request.query,
-            "match_count": request.match_count
-        })
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in search endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@mcp.post("/scan_github")
-async def scan_github_endpoint(request: GitHubScanRequest):
-    """Scan a GitHub repository for markdown documentation."""
-    try:
-        logger.info(f"GitHub scan endpoint called for {request.repo_owner}/{request.repo_name}")
-        result = await invoke_tool("scan_github_repo", {
-            "repo_owner": request.repo_owner,
-            "repo_name": request.repo_name
-        })
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in GitHub scan endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@mcp.post("/scan_github_source_code")
-async def scan_github_source_code_endpoint(request: GitHubScanRequest):
-    """Scan a GitHub repository for source code."""
-    try:
-        logger.info(f"GitHub source code scan endpoint called for {request.repo_owner}/{request.repo_name}")
-        result = await invoke_tool("scan_github_source_code", {
-            "repo_owner": request.repo_owner,
-            "repo_name": request.repo_name
-        })
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in GitHub source code scan endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@mcp.get("/health")
-async def health_check():
-    """
-    Health check endpoint to validate all system dependencies.
-    """
-    from utils import validate_ollama_connection, validate_supabase_connection
-
-    health_status = {
-        "status": "healthy",
-        "timestamp": asyncio.get_event_loop().time(),
-        "components": {}
-    }
-
-    # Check Supabase connection
-    try:
-        supabase_client = get_supabase_client()
-        supabase_ok = validate_supabase_connection(supabase_client)
-        health_status["components"]["supabase"] = {
-            "status": "healthy" if supabase_ok else "unhealthy",
-            "url": os.getenv("SUPABASE_URL", "not_set")
-        }
-    except Exception as e:
-        health_status["status"] = "unhealthy"
-        health_status["components"]["supabase"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-
-    # Check Ollama connection
-    ollama_ok = validate_ollama_connection()
-    health_status["components"]["ollama"] = {
-        "status": "healthy" if ollama_ok else "degraded",
-        "url": os.getenv("OLLAMA_BASE_URL", "not_set"),
-        "model": os.getenv("OLLAMA_MODEL", "not_set"),
-        "note": "Will use fallback embeddings if unavailable"
-    }
-
-    # Check crawler status (basic check)
-    health_status["components"]["crawler"] = {
-        "status": "healthy",
-        "browser": "chromium"
-    }
-
-    # Set overall status based on critical components
-    if health_status["components"]["supabase"]["status"] == "unhealthy":
-        health_status["status"] = "unhealthy"
-    elif health_status["components"]["ollama"]["status"] == "degraded":
-        health_status["status"] = "degraded"
-
-    status_code = 200 if health_status["status"] in ["healthy", "degraded"] else 503
-
-    from fastapi.responses import JSONResponse
-    return JSONResponse(content=health_status, status_code=status_code)
-
-
-# Note: OpenAPI spec is automatically available at /openapi.json via FastMCP
-
-# Update main function to use FastAPI
-
 
 if __name__ == "__main__":
-    # FastMCP handles both SSE and custom HTTP endpoints
+    # Run MCP server (SSE transport with MCP tools)
     logger.info(f"Starting MCP server on {mcp.settings.host}:{mcp.settings.port}")
+    logger.info("Available MCP tools: smart_crawl_url, perform_rag_query, get_available_sources, scan_github_repo")
     mcp.run()
