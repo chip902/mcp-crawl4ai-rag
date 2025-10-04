@@ -19,7 +19,7 @@ docker-compose logs -f
 
 This will start:
 - MCP server on `http://192.168.1.10:8051`
-- OpenAPI server on `http://192.168.1.10:8081`
+- OpenAPI server on `http://192.168.1.10:8082`
 
 ### Configure in Open-WebUI
 
@@ -27,7 +27,7 @@ This will start:
 2. Click **Add New Connection**
 3. Configure:
    - **Type**: OpenAPI
-   - **URL**: `http://192.168.1.10:8081`
+   - **URL**: `http://192.168.1.10:8082`
    - **OpenAPI Spec URL**: Select `openapi.json` from dropdown
    - **Auth**: None
    - **ID**: `crawl4ai-rag`
@@ -38,9 +38,9 @@ This will start:
 ## Available Endpoints
 
 ### Interactive Documentation
-- **Swagger UI**: `http://192.168.1.10:8081/docs`
-- **ReDoc**: `http://192.168.1.10:8081/redoc`
-- **OpenAPI Spec**: `http://192.168.1.10:8081/openapi.json`
+- **Swagger UI**: `http://192.168.1.10:8082/docs`
+- **ReDoc**: `http://192.168.1.10:8082/redoc`
+- **OpenAPI Spec**: `http://192.168.1.10:8082/openapi.json`
 
 ### API Endpoints
 
@@ -61,7 +61,7 @@ This will start:
 ### Query Documentation
 
 ```bash
-curl -X POST http://192.168.1.10:8081/query \
+curl -X POST http://192.168.1.10:8082/query \
   -H "Content-Type: application/json" \
   -d '{
     "query": "spam filtering configuration",
@@ -73,13 +73,13 @@ curl -X POST http://192.168.1.10:8081/query \
 ### List Sources
 
 ```bash
-curl http://192.168.1.10:8081/sources
+curl http://192.168.1.10:8082/sources
 ```
 
 ### Crawl a Page
 
 ```bash
-curl -X POST http://192.168.1.10:8081/crawl/single \
+curl -X POST http://192.168.1.10:8082/crawl/single \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/docs"
@@ -100,7 +100,7 @@ Once configured, you can use the tools in Open-WebUI chat:
 ### Check Server Health
 
 ```bash
-curl http://192.168.1.10:8081/health
+curl http://192.168.1.10:8082/health
 ```
 
 Should return:
@@ -142,7 +142,7 @@ docker-compose restart
          ▼                         ▼
 ┌─────────────────┐       ┌─────────────────┐
 │ OpenAPI Server  │       │   MCP Server    │
-│   Port 8081     │       │   Port 8051     │
+│   Port 8082     │       │   Port 8051     │
 └────────┬────────┘       └────────┬────────┘
          │                         │
          └─────────┬───────────────┘
