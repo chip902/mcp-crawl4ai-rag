@@ -27,6 +27,15 @@ services:
         restart: unless-stopped
         extra_hosts:
             - "host.docker.internal:host-gateway"
+        deploy:
+            resources:
+                limits:
+                    cpus: '2.0'
+                    memory: 4G
+                reservations:
+                    cpus: '1.0'
+                    memory: 2G
+        shm_size: 2gb
 
     openapi-server:
         build:
@@ -56,6 +65,15 @@ services:
         restart: unless-stopped
         extra_hosts:
             - "host.docker.internal:host-gateway"
+        deploy:
+            resources:
+                limits:
+                    cpus: '2.0'
+                    memory: 4G
+                reservations:
+                    cpus: '1.0'
+                    memory: 2G
+        shm_size: 2gb
 
 networks:
     app_network:

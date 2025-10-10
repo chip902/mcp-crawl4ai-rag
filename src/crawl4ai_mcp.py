@@ -14,16 +14,16 @@ from xml.etree import ElementTree
 from dotenv import load_dotenv
 from supabase import Client
 from pathlib import Path
-import requests
 import asyncio
 import json
 import os
 import re
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
-from utils import get_supabase_client, add_documents_to_supabase, search_documents
+from utils import get_supabase_client, add_documents_to_supabase, search_documents, get_http_session
 import logging
 import sys
+import gc
 
 # Configure structured logging
 logging.basicConfig(
@@ -213,7 +213,8 @@ def parse_sitemap(sitemap_url: str) -> List[str]:
     Returns:
         List of URLs found in the sitemap
     """
-    resp = requests.get(sitemap_url)
+    session = get_http_session()
+    resp = session.get(sitemap_url, timeout=30)
     urls = []
 
     if resp.status_code == 200:
@@ -221,7 +222,7 @@ def parse_sitemap(sitemap_url: str) -> List[str]:
             tree = ElementTree.fromstring(resp.content)
             urls = [loc.text for loc in tree.findall('.//{*}loc')]
         except Exception as e:
-            print(f"Error parsing sitemap XML: {e}")
+            logger.error(f"Error parsing sitemap XML: {e}")
 
     return urls
 
@@ -506,6 +507,9 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         add_documents_to_supabase(supabase_client, urls, chunk_numbers,
                                   contents, metadatas, url_to_full_document, batch_size=batch_size)
 
+        # Force garbage collection to free memory
+        gc.collect()
+
         return json.dumps({
             "success": True,
             "url": url,
@@ -581,9 +585,9 @@ async def crawl_batch(crawler: AsyncWebCrawler, urls: List[str], max_concurrent:
         wait_until="networkidle"
     )
     dispatcher = MemoryAdaptiveDispatcher(
-        memory_threshold_percent=70.0,
+        memory_threshold_percent=50.0,
         check_interval=1.0,
-        max_session_permit=max_concurrent
+        max_session_permit=min(max_concurrent, 5)
     )
 
     try:
@@ -625,9 +629,9 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
         wait_until="networkidle"
     )
     dispatcher = MemoryAdaptiveDispatcher(
-        memory_threshold_percent=70.0,
+        memory_threshold_percent=50.0,
         check_interval=1.0,
-        max_session_permit=max_concurrent
+        max_session_permit=min(max_concurrent, 5)
     )
 
     visited = set()
@@ -922,11 +926,12 @@ async def scan_github_source_code(ctx: Context, repo_owner: str, repo_name: str)
 
             # Fetch the source code file directly (no crawling needed)
             try:
-                response = requests.get(raw_url)
+                session = get_http_session()
+                response = session.get(raw_url, timeout=30)
                 response.raise_for_status()
                 source_code = response.text
             except Exception as e:
-                print(f"Error fetching source code from {raw_url}: {e}")
+                logger.error(f"Error fetching source code from {raw_url}: {e}")
                 continue
 
             if source_code:
@@ -956,11 +961,12 @@ async def scan_github_source_code(ctx: Context, repo_owner: str, repo_name: str)
         for doc in source_code_urls:
             raw_url = doc['raw_url']
             try:
-                response = requests.get(raw_url)
+                session = get_http_session()
+                response = session.get(raw_url, timeout=30)
                 response.raise_for_status()
                 url_to_full_document[doc['github_url']] = response.text
             except Exception as e:
-                print(f"Error fetching source code from {raw_url}: {e}")
+                logger.error(f"Error fetching source code from {raw_url}: {e}")
                 url_to_full_document[doc['github_url']] = ""
 
         # Add to Supabase
@@ -1002,7 +1008,8 @@ async def get_docs_urls_from_github(repo_owner: str, repo_name: str) -> List[str
     tree_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/git/trees/main?recursive=1"
 
     try:
-        response = requests.get(tree_url, headers=headers)
+        session = get_http_session()
+        response = session.get(tree_url, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
 
@@ -1048,7 +1055,8 @@ async def get_source_code_urls_from_github(repo_owner: str, repo_name: str) -> L
     tree_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/git/trees/main?recursive=1"
 
     try:
-        response = requests.get(tree_url, headers=headers)
+        session = get_http_session()
+        response = session.get(tree_url, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
 

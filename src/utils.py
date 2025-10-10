@@ -1,5 +1,4 @@
-"""
-Utility functions for the Crawl4AI MCP server.
+"""Utility functions for the Crawl4AI MCP server.
 """
 import os
 import concurrent.futures
@@ -8,6 +7,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import json
 from supabase import create_client, Client
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dataclasses import dataclass
 from urllib.parse import urlparse
 import logging
@@ -21,6 +22,31 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
 # Connection validation cache
 _ollama_validated = False
 _supabase_validated = False
+
+# Global HTTP session with connection pooling
+_http_session = None
+
+def get_http_session() -> requests.Session:
+    """Get or create a shared HTTP session with connection pooling."""
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=10,
+            pool_maxsize=20,
+            pool_block=False
+        )
+        _http_session.mount("http://", adapter)
+        _http_session.mount("https://", adapter)
+    return _http_session
 
 
 def validate_ollama_connection() -> bool:
@@ -37,7 +63,8 @@ def validate_ollama_connection() -> bool:
 
     try:
         # Try to get model list
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        session = get_http_session()
+        response = session.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
         response.raise_for_status()
 
         # Check if our model is available
@@ -140,7 +167,8 @@ def create_embeddings_batch(texts: List[str], max_retries: int = 3) -> List[List
         success = False
         for attempt in range(max_retries):
             try:
-                response = requests.post(
+                session = get_http_session()
+                response = session.post(
                     f"{OLLAMA_BASE_URL}/api/embed",
                     json={"model": OLLAMA_MODEL, "input": text},
                     timeout=30  # 30 second timeout
@@ -192,7 +220,8 @@ def create_embedding(text: str, max_retries: int = 2) -> List[float]:
     # Try with Ollama first
     for attempt in range(max_retries + 1):
         try:
-            response = requests.post(
+            session = get_http_session()
+            response = session.post(
                 f"{OLLAMA_BASE_URL}/api/embed",
                 json={
                     "model": OLLAMA_MODEL,
@@ -317,7 +346,8 @@ def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, 
 
         # Call the Ollama API to generate contextual information
         try:
-            response = requests.post(
+            session = get_http_session()
+            response = session.post(
                 f"{ollama_base_url}/api/embed",
                 json={
                     "model": model_choice,
@@ -494,21 +524,24 @@ def add_documents_to_supabase(
                 full_document = url_to_full_document.get(url, "")
                 process_args.append((url, content, full_document))
 
-            # Process in parallel using ThreadPoolExecutor
+            # Process in parallel using ThreadPoolExecutor with timeout
             contextual_contents = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 # Submit all tasks and collect results
                 future_to_idx = {executor.submit(process_chunk_with_context, arg): idx
                                  for idx, arg in enumerate(process_args)}
 
-                # Process results as they complete
-                for future in concurrent.futures.as_completed(future_to_idx):
+                # Process results as they complete with timeout
+                for future in concurrent.futures.as_completed(future_to_idx, timeout=120):
                     idx = future_to_idx[future]
                     try:
-                        result, success = future.result()
+                        result, success = future.result(timeout=30)
                         contextual_contents.append(result)
                         if success:
                             batch_metadatas[idx]["contextual_embedding"] = True
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(f"Timeout processing chunk {idx}, using original content")
+                        contextual_contents.append(batch_contents[idx])
                     except Exception as e:
                         logger.error(f"Error processing chunk {idx}: {e}")
                         # Use original content as fallback
